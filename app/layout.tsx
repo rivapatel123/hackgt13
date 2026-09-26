@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   title: "ResQ — Emergency voice relay",
   description:
     "Tiny compressed voice messages over satellite, transcribed and sorted by Grok into a live map for relief teams.",
+  icons:{
+    icon: "/local_1.png"
+  }
 };
 
 export const viewport: Viewport = {
