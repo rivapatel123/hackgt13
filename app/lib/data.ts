@@ -23,8 +23,10 @@ export type Report = {
   raw_location_text: string | null;
   latitude: number | null;
   longitude: number | null;
+  accuracy?: number | null; // GPS accuracy radius in metres
+  gpsAddress?: string | null; // street address for the GPS fix
   created_at: string;
-  hazard?: string | null;
+  hazard?: HazardKey | null;
   name?: string;
   people?: number;
   audioUrl?: string;
@@ -141,27 +143,102 @@ export const HAZARDS = [
 
 export type HazardKey = (typeof HAZARDS)[number]["key"];
 
-// ---- Map projection (Tampa Bay operating area) ----
-export const MAP_BOUNDS = {
-  north: 28.1,
-  south: 27.62,
-  west: -82.9,
-  east: -82.22,
+// Phrases that point to each disaster type, with a weight for how strongly
+// they imply it (e.g. "lava" is unambiguous, "water" is only a hint).
+const HAZARD_CUES: Record<HazardKey, [RegExp, number, string][]> = {
+  hurricane: [
+    [/\bhurricanes?\b/, 5, "hurricane"],
+    [/\bstorm surge\b/, 4, "storm surge"],
+    [/\b(tropical storm|category \d|cat \d)\b/, 4, "category storm"],
+    [/\b(wind|winds|windy)\b/, 2, "wind"],
+    [
+      /\broof\b.*\b(off|gone|blew|torn|ripped)\b|\b(blew|torn|ripped) (off )?(the |our )?roof\b/,
+      3,
+      "roof blown off",
+    ],
+    [/\bstorm\b/, 2, "storm"],
+    [/\bpower (is )?(out|lines? down)\b/, 1, "power out"],
+  ],
+  flood: [
+    [/\bflood(ing|ed|s)?\b/, 5, "flooding"],
+    [
+      /\b(water|waters) (is |are )?(rising|coming in|up to|everywhere)\b|\brising water\b/,
+      4,
+      "rising water",
+    ],
+    [/\bunder ?water\b/, 3, "underwater"],
+    [/\b(boat|kayak|raft)\b/, 2, "boat"],
+    [
+      /\b(attic|roof)\b.*\bwater\b|\bwater\b.*\b(attic|waist|chest|knee|windows?)\b/,
+      3,
+      "high water",
+    ],
+    [/\bdrown/, 3, "drowning"],
+  ],
+  tornado: [
+    [/\btornado(es)?\b|\btwister\b/, 6, "tornado"],
+    [/\bfunnel( cloud)?\b/, 4, "funnel cloud"],
+    [/\b(siren|sirens)\b/, 1, "sirens"],
+    [/\b(sounded like|like) a (freight )?train\b/, 3, "sounded like a train"],
+    [/\bdebris\b/, 1, "debris"],
+  ],
+  earthquake: [
+    [/\bearth ?quakes?\b|\bquake\b/, 6, "earthquake"],
+    [/\b(shaking|shook|tremor|aftershocks?)\b/, 4, "shaking"],
+    [/\b(collapsed|collapse|rubble|caved in|pancaked)\b/, 3, "collapse"],
+    [
+      /\b(crack|cracks|cracked)\b.*\b(wall|ground|building|floor)\b/,
+      2,
+      "cracks",
+    ],
+  ],
+  wildfire: [
+    [/\bwild ?fires?\b|\bforest fire\b|\bbrush fire\b/, 6, "wildfire"],
+    [/\b(fire|fires|flames|burning|on fire)\b/, 3, "fire"],
+    [/\bsmoke\b/, 3, "smoke"],
+    [/\b(embers|ash falling|can'?t breathe.*smoke)\b/, 2, "embers"],
+  ],
+  tsunami: [
+    [/\btsunamis?\b/, 6, "tsunami"],
+    [/\b(huge|giant|big) waves?\b|\bwave (came|hit)\b/, 4, "huge wave"],
+    [/\b(ocean|sea) (came|is coming|pulled back|went out)\b/, 4, "sea surge"],
+  ],
+  volcano: [
+    [/\bvolcan(o|oes|ic)\b/, 6, "volcano"],
+    [/\b(lava|magma)\b/, 6, "lava"],
+    [/\berupt(ion|ing|ed)?\b/, 5, "eruption"],
+    [/\bash\b/, 2, "ash"],
+  ],
 };
-export const MAP_W = 1000;
-export const MAP_H = 700;
 
-export function project(lat: number, lng: number) {
-  const x =
-    ((lng - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west)) * MAP_W;
-  const y =
-    ((MAP_BOUNDS.north - lat) / (MAP_BOUNDS.north - MAP_BOUNDS.south)) * MAP_H;
-  return {
-    x: Math.min(MAP_W - 12, Math.max(12, x)),
-    y: Math.min(MAP_H - 12, Math.max(12, y)),
-  };
+/**
+ * Guess which disaster the caller is describing from their words.
+ * Returns null until there's enough signal (score >= 3) to be useful.
+ */
+export function detectHazard(
+  text: string,
+): { key: HazardKey; score: number; cues: string[] } | null {
+  const t = ` ${text.toLowerCase()} `;
+  let best: { key: HazardKey; score: number; cues: string[] } | null = null;
+  for (const key of Object.keys(HAZARD_CUES) as HazardKey[]) {
+    let score = 0;
+    const cues: string[] = [];
+    for (const [re, weight, cue] of HAZARD_CUES[key]) {
+      if (re.test(t)) {
+        score += weight;
+        cues.push(cue);
+      }
+    }
+    if (score > (best?.score ?? 0)) best = { key, score, cues };
+  }
+  return best && best.score >= 3 ? best : null;
 }
 
+export function isHazardKey(v: unknown): v is HazardKey {
+  return HAZARDS.some((h) => h.key === v);
+}
+
+// Demo scenario neighbourhoods (Tampa Bay) used to place placeholder reports.
 export const NEIGHBORHOODS = [
   { name: "Downtown Tampa", lat: 27.95, lng: -82.46 },
   { name: "Seminole Heights", lat: 28.0, lng: -82.46 },
@@ -403,7 +480,7 @@ function buildSeedReports(): Report[] {
       hazard: "hurricane",
       name,
       people: 1 + Math.floor(rand() * 5),
-      sizeKb: Math.round((2.4 + rand() * 3.2) * 10) / 10,
+      sizeKb: Math.round((7 + rand() * 11) * 10) / 10,
       durationSec: 9 + Math.floor(rand() * 20),
       assignedTo: rand() > 0.55 ? pick(RESPONDER_UNITS) : null,
     });
@@ -426,7 +503,7 @@ export const SEED_REPORTS = buildSeedReports();
 export const INCIDENT_STATS = {
   messagesReceived: 5184,
   pinned: 4927,
-  avgSizeKb: 3.8,
+  avgSizeKb: 12,
   medianDispatchMin: 6.7,
   markedSafe: 1312,
   respondersActive: 214,
@@ -568,4 +645,41 @@ export function classifyLocally(text: string): {
         ? "high"
         : "medium";
   return { category, urgency };
+}
+
+// Where the demo civilian (Maria Delgado) is sheltering in the scenario.
+export const DEMO_HOME = {
+  lat: 27.9312,
+  lng: -82.4818,
+  accuracy: 9,
+  label: "412 Bayshore Blvd, Apt 2B, Tampa",
+};
+
+// ---- Fallback text helpers (used when Grok isn't available) ----
+
+const NEED_WORDS =
+  /\b(need|help|hurt|injur|bleed|broken|trapped|stuck|rising|flood|fire|smoke|missing|can'?t|insulin|oxygen|pregnan|boat|water|food|shelter|roof|collapsed|safe)\b/i;
+const INTRO = /^(this is|my name|hi|hello|it'?s \w+ here)\b/i;
+
+/** Pick the sentences that say what's wrong, for a short dispatcher title. */
+export function summarize(transcript: string, max = 90): string {
+  const sentences = transcript
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const useful = sentences.filter((s) => NEED_WORDS.test(s) && !INTRO.test(s));
+  let text = (useful.length ? useful : sentences).join(" ");
+  if (text.length > max) {
+    text = text.slice(0, max);
+    text = `${text.slice(0, text.lastIndexOf(" ")).replace(/[,.;:]$/, "")}…`;
+  }
+  return text;
+}
+
+/** Find a spoken street address like "412 Bayshore Boulevard". */
+export function extractAddress(transcript: string): string | null {
+  const m = transcript.match(
+    /\b\d{1,6}\s+(?:[A-Z][\w']*\s+){1,4}(?:Boulevard|Blvd|Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct|Highway|Hwy|Parkway|Pkwy|Place|Pl|Circle|Terrace)\b\.?/,
+  );
+  return m ? m[0].replace(/\.$/, "") : null;
 }

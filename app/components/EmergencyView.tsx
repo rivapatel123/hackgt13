@@ -1,18 +1,23 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   CATEGORIES,
+  DEMO_HOME,
   HAZARDS,
   INCIDENT_STATS,
   classifyLocally,
-  normalizeCategory,
-  normalizeUrgency,
+  detectHazard,
   type HazardKey,
   type Report,
 } from "@/app/lib/data";
+import { postReport } from "@/app/lib/api";
 import { useRecorder, type Recording } from "@/app/lib/useRecorder";
-import type { AppSettings } from "@/app/components/SettingsView";
+import {
+  LANGUAGE_CODES,
+  type AppSettings,
+} from "@/app/components/SettingsView";
 import {
   AlertIcon,
   CheckIcon,
@@ -28,6 +33,7 @@ import {
   WaveIcon,
 } from "@/app/components/icons";
 import { CategoryBadge, UrgencyBadge } from "@/app/components/Badges";
+import LeafletMap, { type MapPin } from "@/app/components/LeafletMap";
 
 type Stage = "idle" | "sending" | "done";
 type StepState = "done" | "active" | "waiting" | "failed";
@@ -65,20 +71,34 @@ const PROMPTS = [
 
 export default function EmergencyView({
   settings,
-  hazard,
-  onHazardChange,
   myReports,
   onReport,
-  onOpenMap,
+  onCheckInSafe,
+  safeStatus,
+  onOpenFamily,
 }: {
   settings: AppSettings;
-  hazard: HazardKey | null;
-  onHazardChange: (h: HazardKey | null) => void;
   myReports: Report[];
   onReport: (r: Report, replaceId?: string) => void;
-  onOpenMap: (id: string) => void;
+  onCheckInSafe: () => void;
+  safeStatus: "idle" | "sending" | "sent";
+  onOpenFamily: () => void;
 }) {
   const [submission, setSubmission] = useState<Submission | null>(null);
+  // A chip the caller tapped themselves always wins over the voice guess.
+  const [manualHazard, setManualHazard] = useState<HazardKey | "none" | null>(
+    null,
+  );
+
+  const hazardFor = useCallback(
+    (text: string): HazardKey | null => {
+      if (manualHazard) return manualHazard === "none" ? null : manualHazard;
+      return settings.autoDetectHazard
+        ? (detectHazard(text)?.key ?? null)
+        : null;
+    },
+    [manualHazard, settings.autoDetectHazard],
+  );
 
   const send = useCallback(
     async (rec: Recording, replaceId?: string) => {
@@ -100,42 +120,40 @@ export default function EmergencyView({
           type: rec.mimeType,
         }),
       );
-      if (rec.coords) {
-        fd.append("lat", String(rec.coords.lat));
-        fd.append("lng", String(rec.coords.lng));
+      const coords = !settings.shareLocation
+        ? null
+        : settings.demoLocation
+          ? DEMO_HOME
+          : rec.coords;
+      if (coords) {
+        fd.append("lat", String(coords.lat));
+        fd.append("lng", String(coords.lng));
+        if (!settings.demoLocation)
+          fd.append("accuracy", String(Math.round(coords.accuracy)));
       }
+      const hazard = hazardFor(rec.transcript);
       if (hazard) fd.append("hazard", hazard);
+      if (rec.transcript) fd.append("transcript", rec.transcript);
+      fd.append("duration", String(Math.round(rec.durationSec)));
+      fd.append("name", "Maria Delgado");
+      fd.append("source", "voice");
 
+      // Play back the local copy instantly; the server keeps its own copy.
       const base = {
         audioUrl: rec.url,
         sizeKb: Math.round(rec.sizeKb * 10) / 10,
         durationSec: Math.round(rec.durationSec),
-        hazard,
         live: true,
-        assignedTo: null,
       };
 
       let report: Report;
       let error: string | null = null;
       try {
-        const res = await fetch("/api/reports", {
-          method: "POST",
-          body: fd,
-          signal: AbortSignal.timeout(25_000),
-        });
-        if (!res.ok) throw new Error(`Server responded ${res.status}`);
-        const data = await res.json();
+        const saved = await postReport(fd);
         report = {
-          ...data,
+          ...saved,
           ...base,
-          transcript: data.transcript || rec.transcript,
-          category: normalizeCategory(data.category),
-          urgency: normalizeUrgency(data.urgency),
-          created_at: data.created_at
-            ? new Date(
-                `${String(data.created_at).replace(" ", "T")}Z`,
-              ).toISOString()
-            : new Date().toISOString(),
+          transcript: saved.transcript || rec.transcript,
         };
       } catch (e) {
         // Keep the person's message even if the uplink or AI is unavailable.
@@ -143,6 +161,8 @@ export default function EmergencyView({
         error = e instanceof Error ? e.message : "Upload failed";
         report = {
           ...base,
+          hazard,
+          assignedTo: null,
           id: `local-${Date.now()}`,
           transcript:
             rec.transcript ||
@@ -152,11 +172,12 @@ export default function EmergencyView({
           description: rec.transcript
             ? rec.transcript.slice(0, 120)
             : "Voice message queued",
-          raw_location_text: rec.coords
-            ? `GPS ${rec.coords.lat.toFixed(4)}, ${rec.coords.lng.toFixed(4)}`
+          raw_location_text: coords
+            ? `GPS ${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`
             : null,
-          latitude: rec.coords?.lat ?? null,
-          longitude: rec.coords?.lng ?? null,
+          latitude: coords?.lat ?? null,
+          longitude: coords?.lng ?? null,
+          accuracy: settings.demoLocation ? null : (coords?.accuracy ?? null),
           created_at: new Date().toISOString(),
           classifiedOnDevice: true,
         };
@@ -164,14 +185,15 @@ export default function EmergencyView({
       onReport(report, replaceId);
       setSubmission({ recording: rec, report, stage: "done", error });
     },
-    [hazard, onReport],
+    [hazardFor, onReport, settings.shareLocation, settings.demoLocation],
   );
 
   const recorder = useRecorder({
     bitrate: settings.bitrate,
     maxSeconds: 45,
     autoStopOnSilence: settings.autoStopOnSilence,
-    shareLocation: settings.shareLocation,
+    shareLocation: settings.shareLocation && !settings.demoLocation,
+    lang: LANGUAGE_CODES[settings.language] ?? "en-US",
     onComplete: send,
   });
 
@@ -190,9 +212,26 @@ export default function EmergencyView({
     if (recording) recorder.stop();
     else if (!requesting) {
       setSubmission(null);
+      setManualHazard(null);
       recorder.start();
     }
   };
+
+  // The voice guess updates live as the caller talks.
+  const detection =
+    settings.autoDetectHazard && !manualHazard
+      ? detectHazard(recorder.transcript)
+      : null;
+  const serverHazard = submission?.report?.hazard ?? null;
+  const hazard: HazardKey | null =
+    manualHazard === "none"
+      ? null
+      : (manualHazard ?? detection?.key ?? serverHazard ?? null);
+  const autoPicked = !manualHazard && hazard != null;
+  const latest = submission?.report
+    ? (myReports.find((r) => r.id === submission.report!.id) ??
+      submission.report)
+    : null;
 
   const secs = Math.floor(recorder.elapsed);
   const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
@@ -229,7 +268,9 @@ export default function EmergencyView({
             <legend className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
               What&apos;s happening?{" "}
               <span className="normal-case tracking-normal">
-                (optional · one tap)
+                {settings.autoDetectHazard
+                  ? "(we pick this from your voice)"
+                  : "(optional · one tap)"}
               </span>
             </legend>
             <div className="flex flex-wrap gap-2">
@@ -240,7 +281,7 @@ export default function EmergencyView({
                     key={h.key}
                     type="button"
                     aria-pressed={on}
-                    onClick={() => onHazardChange(on ? null : h.key)}
+                    onClick={() => setManualHazard(on ? "none" : h.key)}
                     className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 ${
                       on
                         ? "border-red-600 bg-red-600 text-white shadow-sm"
@@ -249,10 +290,46 @@ export default function EmergencyView({
                   >
                     <span aria-hidden="true">{h.emoji}</span>
                     {h.label}
+                    {on && autoPicked && (
+                      <span className="rounded-full bg-white/25 px-1.5 text-[10px] font-bold tracking-wide uppercase">
+                        Auto
+                      </span>
+                    )}
                   </button>
                 );
               })}
             </div>
+            <p
+              aria-live="polite"
+              className="mt-2 flex min-h-5 items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-400"
+            >
+              {autoPicked && hazard ? (
+                <>
+                  <MicIcon
+                    width={14}
+                    height={14}
+                    className="shrink-0 text-red-600 dark:text-red-400"
+                  />
+                  <span>
+                    Detected from your voice:{" "}
+                    <strong className="text-zinc-900 dark:text-zinc-100">
+                      {HAZARDS.find((h) => h.key === hazard)?.label}
+                    </strong>
+                    {detection?.cues.length
+                      ? ` — heard “${detection.cues.slice(0, 3).join("”, “")}”`
+                      : " — from your last message"}
+                    . Tap another if it&apos;s wrong.
+                  </span>
+                </>
+              ) : manualHazard && manualHazard !== "none" ? (
+                <span>You picked this. Tap it again to clear.</span>
+              ) : settings.autoDetectHazard ? (
+                <span>
+                  Just talk — say what&apos;s happening and we&apos;ll select it
+                  for you.
+                </span>
+              ) : null}
+            </p>
           </fieldset>
 
           <div className="mt-8 flex flex-col items-center">
@@ -383,9 +460,9 @@ export default function EmergencyView({
                 </p>
               ) : (
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                  Your message is compressed to about{" "}
+                  Your voice is compressed to about{" "}
                   <strong className="text-zinc-800 dark:text-zinc-200">
-                    4 KB
+                    1.5 KB per second
                   </strong>{" "}
                   so it gets through even on a weak satellite link.
                 </p>
@@ -393,32 +470,32 @@ export default function EmergencyView({
             </div>
 
             {!recording && (
-              <button
-                type="button"
-                onClick={() =>
-                  onReport({
-                    id: `safe-${Date.now()}`,
-                    transcript: "One-tap check-in: I'm safe.",
-                    category: "safe",
-                    urgency: "low",
-                    description: "Marked safe via one-tap check-in",
-                    raw_location_text: recorder.coords
-                      ? `GPS ${recorder.coords.lat.toFixed(4)}, ${recorder.coords.lng.toFixed(4)}`
-                      : null,
-                    latitude: recorder.coords?.lat ?? null,
-                    longitude: recorder.coords?.lng ?? null,
-                    created_at: new Date().toISOString(),
-                    hazard,
-                    sizeKb: 0.2,
-                    live: true,
-                    assignedTo: null,
-                  })
-                }
-                className="mt-2 inline-flex items-center gap-2 rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 dark:hover:bg-emerald-950"
-              >
-                <ShieldIcon width={16} height={16} /> I&apos;m safe — tell my
-                family
-              </button>
+              <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={onCheckInSafe}
+                  disabled={safeStatus === "sending"}
+                  className="inline-flex items-center gap-2 rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:opacity-60 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+                >
+                  {safeStatus === "sent" ? (
+                    <CheckIcon width={16} height={16} />
+                  ) : (
+                    <ShieldIcon width={16} height={16} />
+                  )}
+                  {safeStatus === "sent"
+                    ? "Family told you're safe"
+                    : safeStatus === "sending"
+                      ? "Telling your family…"
+                      : "I'm safe — tell my family"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenFamily}
+                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  <UsersIcon width={16} height={16} /> Family Circle
+                </button>
+              </div>
             )}
           </div>
         </section>
@@ -479,9 +556,20 @@ export default function EmergencyView({
           </section>
 
           <DeliveryCard
-            submission={submission}
-            coords={recorder.coords}
-            onOpenMap={onOpenMap}
+            submission={
+              submission && latest
+                ? { ...submission, report: latest }
+                : submission
+            }
+            coords={
+              !settings.shareLocation
+                ? null
+                : settings.demoLocation
+                  ? DEMO_HOME
+                  : (submission?.recording.coords ?? recorder.coords)
+            }
+            demo={settings.demoLocation}
+            geoError={settings.demoLocation ? null : recorder.geoError}
             onRetry={() =>
               submission && send(submission.recording, submission.report?.id)
             }
@@ -543,12 +631,14 @@ export default function EmergencyView({
 function DeliveryCard({
   submission,
   coords,
-  onOpenMap,
+  demo,
+  geoError,
   onRetry,
 }: {
   submission: Submission | null;
   coords: Recording["coords"];
-  onOpenMap: (id: string) => void;
+  demo: boolean;
+  geoError: string | null;
   onRetry: () => void;
 }) {
   if (!submission) {
@@ -570,9 +660,13 @@ function DeliveryCard({
           </li>
         </ul>
         <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-500">
-          {coords
-            ? `Location locked ±${Math.round(coords.accuracy)} m`
-            : "Location is captured when you tap SOS."}
+          {geoError
+            ? geoError
+            : coords
+              ? demo
+                ? "Using the demo location (412 Bayshore Blvd)."
+                : `GPS locked · ±${Math.round(coords.accuracy)} m`
+              : "Your GPS location is captured when you tap SOS."}
         </p>
       </section>
     );
@@ -600,9 +694,13 @@ function DeliveryCard({
         }
       : {
           label: "Sent via satellite",
-          detail: recording.coords
-            ? "with GPS location"
-            : "location from your words",
+          detail: coords
+            ? demo
+              ? "with demo location"
+              : `with GPS · ±${Math.round(coords.accuracy)} m`
+            : geoError
+              ? "GPS blocked · using your words"
+              : "location from your words",
           state: done ? "done" : "active",
         },
     failed
@@ -612,7 +710,9 @@ function DeliveryCard({
           state: "done",
         }
       : {
-          label: "Transcribed & sorted by Grok",
+          label: report?.classifiedOnDevice
+            ? "Transcribed & sorted"
+            : "Transcribed & sorted by Grok",
           detail: report ? CATEGORIES[report.category].label : "…",
           state: done ? "done" : "waiting",
         },
@@ -621,6 +721,21 @@ function DeliveryCard({
       detail: failed ? "After it's sent" : "Pinned on dispatcher map",
       state: done && !failed ? "done" : "waiting",
     },
+    ...(done && !failed
+      ? [
+          report?.assignedTo
+            ? {
+                label: `${report.assignedTo} is on the way`,
+                detail: "Stay where you are",
+                state: "done" as StepState,
+              }
+            : {
+                label: "Waiting for a responder",
+                detail: "You'll see who's coming here",
+                state: "active" as StepState,
+              },
+        ]
+      : []),
   ];
 
   return (
@@ -691,6 +806,10 @@ function DeliveryCard({
         <audio controls src={recording.url} className="h-10 w-full" />
       </div>
 
+      {report?.latitude != null && report.longitude != null && (
+        <YourLocation report={report} demo={demo} />
+      )}
+
       {report && (
         <div className="mt-4 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -706,13 +825,15 @@ function DeliveryCard({
               phone — tap Send again when you have signal.
             </p>
           )}
-          <button
-            type="button"
-            onClick={() => onOpenMap(report.id)}
-            className="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-red-700 hover:underline dark:text-red-400"
-          >
-            <PinIcon width={16} height={16} /> See it on the responder map
-          </button>
+          {!error && (
+            <Link
+              href={`/responder?report=${report.id}`}
+              target="_blank"
+              className="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-red-700 hover:underline dark:text-red-400"
+            >
+              <PinIcon width={16} height={16} /> See what responders see ↗
+            </Link>
+          )}
         </div>
       )}
     </section>
@@ -801,5 +922,47 @@ function StatsGrid() {
         ))}
       </div>
     </section>
+  );
+}
+
+function YourLocation({ report, demo }: { report: Report; demo: boolean }) {
+  const pins = useMemo<MapPin[]>(
+    () => [
+      {
+        kind: "avatar",
+        id: "me",
+        lat: report.latitude!,
+        lng: report.longitude!,
+        initials: "MD",
+        label: "You",
+        ring: "#dc2626",
+        pulse: true,
+        accuracy: report.accuracy,
+      },
+    ],
+    [report.latitude, report.longitude, report.accuracy],
+  );
+  return (
+    <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
+      <LeafletMap
+        ariaLabel="Map showing the location you sent"
+        className="h-44"
+        pins={pins}
+        fitKey={`${report.latitude},${report.longitude}`}
+        maxFitZoom={16}
+      />
+      <p className="flex items-start gap-1.5 px-3 py-2 text-xs text-zinc-600 dark:text-zinc-400">
+        <PinIcon width={14} height={14} className="mt-px shrink-0" />
+        <span>
+          <strong className="font-semibold text-zinc-900 dark:text-zinc-100">
+            {demo ? "Demo location sent" : "Your GPS location was sent"}
+          </strong>
+          {" · "}
+          {report.gpsAddress ??
+            `${report.latitude!.toFixed(5)}, ${report.longitude!.toFixed(5)}`}
+          {report.accuracy ? ` · ±${Math.round(report.accuracy)} m` : ""}
+        </span>
+      </p>
+    </div>
   );
 }

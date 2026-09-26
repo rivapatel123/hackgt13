@@ -5,16 +5,12 @@ import {
   CATEGORIES,
   DEMO_NOW,
   INCIDENT_STATS,
-  MAP_BOUNDS,
-  MAP_H,
-  MAP_W,
-  NEIGHBORHOODS,
   RESPONDER_UNITS,
-  project,
   timeAgo,
   type CategoryKey,
   type Report,
 } from "@/app/lib/data";
+import LeafletMap, { type MapPin } from "@/app/components/LeafletMap";
 import {
   CategoryBadge,
   CategoryDot,
@@ -25,26 +21,15 @@ import {
   CheckIcon,
   PinIcon,
   SearchIcon,
+  TrashIcon,
   XIcon,
 } from "@/app/components/icons";
 
 const URGENCY_RANK = { high: 0, medium: 1, low: 2 } as const;
 
-function inBounds(r: Report) {
-  return (
-    r.latitude != null &&
-    r.longitude != null &&
-    r.latitude <= MAP_BOUNDS.north &&
-    r.latitude >= MAP_BOUNDS.south &&
-    r.longitude >= MAP_BOUNDS.west &&
-    r.longitude <= MAP_BOUNDS.east
-  );
-}
-
-function when(r: Report) {
-  return r.live
-    ? timeAgo(r.created_at, Date.parse(r.created_at))
-    : timeAgo(r.created_at, DEMO_NOW);
+// Demo reports are relative to the scenario clock; live ones to the real clock.
+function when(r: Report, now: number) {
+  return timeAgo(r.created_at, r.live ? now : DEMO_NOW);
 }
 
 export default function MapView({
@@ -52,16 +37,20 @@ export default function MapView({
   selectedId,
   onSelect,
   onAssign,
+  onDelete,
+  now,
 }: {
   reports: Report[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onAssign: (id: string, unit: string | null) => void;
+  onDelete: (id: string) => void;
+  now: number;
 }) {
   const [query, setQuery] = useState("");
   const [cats, setCats] = useState<Set<CategoryKey>>(new Set());
   const [urgentOnly, setUrgentOnly] = useState(false);
-  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [fitKey, setFitKey] = useState(0);
 
   const counts = useMemo(() => {
     const c = new Map<CategoryKey, number>();
@@ -96,10 +85,29 @@ export default function MapView({
       );
   }, [reports, cats, urgentOnly, query]);
 
-  const pinned = filtered.filter(inBounds);
-  const offMap = filtered.filter((r) => r.live && !inBounds(r));
   const selected = reports.find((r) => r.id === selectedId) ?? null;
-  const hovered = pinned.find((r) => r.id === hoverId) ?? null;
+
+  const pins = useMemo<MapPin[]>(
+    () =>
+      filtered
+        .filter((r) => r.latitude != null && r.longitude != null)
+        .map((r) => {
+          const c = CATEGORIES[r.category];
+          return {
+            kind: "dot" as const,
+            id: r.id,
+            lat: r.latitude!,
+            lng: r.longitude!,
+            color: c.color,
+            darkColor: c.darkColor,
+            radius: r.urgency === "high" || r.live ? 9 : 7,
+            pulse: !!r.live || (r.urgency === "high" && !r.assignedTo),
+            tooltip: `${c.label} · ${r.description}`,
+            accuracy: r.id === selectedId ? r.accuracy : null,
+          };
+        }),
+    [filtered, selectedId],
+  );
 
   const toggleCat = (k: CategoryKey) =>
     setCats((prev) => {
@@ -178,203 +186,44 @@ export default function MapView({
           aria-label="Map of help requests"
           className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm xl:col-span-2 dark:border-zinc-800 dark:bg-zinc-900"
         >
-          <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-2.5 text-sm dark:border-zinc-800">
+          <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-2.5 text-sm dark:border-zinc-800">
             <p className="font-medium">
-              Tampa Bay operating area ·{" "}
-              <span className="tabular-nums">{pinned.length}</span> pins shown
+              Live map · <span className="tabular-nums">{pins.length}</span>{" "}
+              pins at their GPS positions
             </p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Sample of {INCIDENT_STATS.pinned.toLocaleString()} located
-              messages
-            </p>
+            <div className="flex items-center gap-3">
+              <p className="hidden text-xs text-zinc-500 sm:block dark:text-zinc-400">
+                Sample of {INCIDENT_STATS.pinned.toLocaleString()} located
+                messages
+              </p>
+              <button
+                type="button"
+                onClick={() => setFitKey((k) => k + 1)}
+                className="rounded-md border border-zinc-200 px-2 py-1 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                Show all pins
+              </button>
+            </div>
           </div>
           <div className="relative">
-            <svg
-              viewBox={`0 0 ${MAP_W} ${MAP_H}`}
-              className="block h-auto w-full"
-              role="img"
-              aria-label="Stylized map of Tampa Bay with request pins"
-            >
-              <defs>
-                <pattern
-                  id="grid"
-                  width="50"
-                  height="50"
-                  patternUnits="userSpaceOnUse"
-                >
-                  <path
-                    d="M50 0H0V50"
-                    fill="none"
-                    className="stroke-zinc-200 dark:stroke-zinc-800"
-                    strokeWidth="1"
-                  />
-                </pattern>
-              </defs>
-              <rect
-                width={MAP_W}
-                height={MAP_H}
-                className="fill-stone-100 dark:fill-zinc-950"
-              />
-              <rect width={MAP_W} height={MAP_H} fill="url(#grid)" />
-              {/* Gulf of Mexico */}
-              <path
-                d="M0 0 L100 0 C110 120 120 250 130 330 C150 420 200 500 230 560 C250 610 280 660 330 700 L0 700 Z"
-                className="fill-sky-100 dark:fill-sky-950/70"
-              />
-              {/* Tampa Bay */}
-              <path
-                d="M520 170 C560 200 560 260 590 290 L640 260 L660 300 C680 360 660 420 650 460 L640 520 C620 580 600 640 560 700 L330 700 C380 640 440 580 450 540 C460 460 440 400 470 350 C490 300 470 240 520 170 Z"
-                className="fill-sky-100 dark:fill-sky-950/70"
-              />
-              {/* Storm track */}
-              <path
-                d="M40 690 C180 560 300 420 520 300 S 860 120 990 40"
-                fill="none"
-                strokeDasharray="6 8"
-                strokeWidth="2"
-                className="stroke-red-400/70 dark:stroke-red-500/60"
-              />
-              <text
-                x="985"
-                y="80"
-                textAnchor="end"
-                className="fill-red-500 text-[18px] font-semibold dark:fill-red-400"
-              >
-                Forecast track · Delphine →
-              </text>
-              <text
-                x="30"
-                y="420"
-                className="fill-sky-500/80 text-[18px] italic dark:fill-sky-400/70"
-              >
-                Gulf of Mexico
-              </text>
-              <text
-                x="520"
-                y="620"
-                className="fill-sky-500/80 text-[18px] italic dark:fill-sky-400/70"
-              >
-                Tampa Bay
-              </text>
-              {[...pinned].reverse().map((r) => {
-                const p = project(r.latitude!, r.longitude!);
-                const c = CATEGORIES[r.category];
-                const isSel = r.id === selectedId;
-                const radius = isSel ? 13 : r.urgency === "high" ? 9 : 7;
-                return (
-                  <g
-                    key={r.id}
-                    transform={`translate(${p.x} ${p.y})`}
-                    className="cursor-pointer"
-                    style={{
-                      ["--c" as string]: c.color,
-                      ["--cd" as string]: c.darkColor,
-                    }}
-                    onClick={() => onSelect(r.id)}
-                    onMouseEnter={() => setHoverId(r.id)}
-                    onMouseLeave={() => setHoverId(null)}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`${c.label}, ${r.urgency} urgency, ${r.raw_location_text ?? "unknown location"}`}
-                    onKeyDown={(e) =>
-                      (e.key === "Enter" || e.key === " ") && onSelect(r.id)
-                    }
-                  >
-                    {/* generous hit target */}
-                    <circle r={18} fill="transparent" />
-                    {(r.urgency === "high" || r.live) && (
-                      <circle
-                        r={radius + 6}
-                        className="fill-[var(--c)] opacity-25 motion-safe:animate-pulse dark:fill-[var(--cd)]"
-                      />
-                    )}
-                    <circle
-                      r={radius}
-                      strokeWidth={2}
-                      className="fill-[var(--c)] stroke-white dark:fill-[var(--cd)] dark:stroke-zinc-950"
-                    />
-                    {isSel && (
-                      <circle
-                        r={radius + 5}
-                        fill="none"
-                        strokeWidth={2}
-                        className="stroke-zinc-900 dark:stroke-white"
-                      />
-                    )}
-                  </g>
-                );
-              })}
-              {NEIGHBORHOODS.map((n) => {
-                const p = project(n.lat, n.lng);
-                return (
-                  <text
-                    key={n.name}
-                    x={p.x}
-                    y={p.y - 44}
-                    textAnchor="middle"
-                    paintOrder="stroke"
-                    strokeWidth={5}
-                    strokeLinejoin="round"
-                    className="fill-zinc-600 stroke-stone-100 pointer-events-none text-[15px] font-semibold dark:fill-zinc-400 dark:stroke-zinc-950"
-                  >
-                    {n.name}
-                  </text>
-                );
-              })}
-            </svg>
-
-            {hovered && (
-              <div
-                className="pointer-events-none absolute z-10 w-60 -translate-x-1/2 -translate-y-[calc(100%+14px)] rounded-lg border border-zinc-200 bg-white p-2.5 text-xs shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
-                style={{
-                  left: `${(project(hovered.latitude!, hovered.longitude!).x / MAP_W) * 100}%`,
-                  top: `${(project(hovered.latitude!, hovered.longitude!).y / MAP_H) * 100}%`,
-                }}
-              >
-                <p className="flex items-center gap-1.5 font-semibold">
-                  <CategoryDot category={hovered.category} />{" "}
-                  {CATEGORIES[hovered.category].label}
-                  <span className="ml-auto font-normal text-zinc-500 dark:text-zinc-400">
-                    {when(hovered)}
-                  </span>
-                </p>
-                <p className="mt-1 line-clamp-2 text-zinc-600 dark:text-zinc-300">
-                  {hovered.description}
-                </p>
-              </div>
-            )}
-
-            {offMap.length > 0 && (
-              <div className="absolute top-3 right-3 max-w-[16rem] rounded-lg border border-amber-300 bg-amber-50 p-2.5 text-xs text-amber-900 shadow dark:border-amber-800 dark:bg-amber-950/80 dark:text-amber-100">
-                <p className="font-semibold">
-                  {offMap.length} live message{offMap.length > 1 ? "s" : ""}{" "}
-                  outside this area
-                </p>
-                {offMap.slice(0, 3).map((r) => (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => onSelect(r.id)}
-                    className="mt-1 block text-left underline"
-                  >
-                    {r.latitude != null
-                      ? `${r.latitude.toFixed(3)}, ${r.longitude!.toFixed(3)}`
-                      : "Location pending"}{" "}
-                    · {CATEGORIES[r.category].short}
-                  </button>
-                ))}
-              </div>
-            )}
-
+            <LeafletMap
+              ariaLabel="Street map with help-request pins"
+              className="h-[26rem] sm:h-[32rem] xl:h-[38rem]"
+              pins={pins}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              fitKey={fitKey}
+              maxFitZoom={12}
+            />
             {/* Legend */}
-            <div className="absolute bottom-3 left-3 flex max-w-[calc(100%-1.5rem)] flex-wrap gap-x-3 gap-y-1 rounded-lg border border-zinc-200 bg-white/90 px-3 py-2 text-xs backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/90">
+            <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] flex max-w-[calc(100%-7rem)] flex-wrap gap-x-3 gap-y-1 rounded-lg border border-zinc-200 bg-white/90 px-3 py-2 text-xs backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/90">
               {catKeys.map((k) => (
                 <span key={k} className="inline-flex items-center gap-1.5">
                   <CategoryDot category={k} /> {CATEGORIES[k].short}
                 </span>
               ))}
               <span className="inline-flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
-                Large pin = urgent
+                Large pin = urgent · blue ring = GPS accuracy
               </span>
             </div>
           </div>
@@ -391,6 +240,7 @@ export default function MapView({
                 report={selected}
                 onClose={() => onSelect(null)}
                 onAssign={onAssign}
+                now={now}
               />
             ) : (
               <>
@@ -404,13 +254,11 @@ export default function MapView({
                 </div>
                 <ul className="flex-1 divide-y divide-zinc-200 overflow-y-auto dark:divide-zinc-800">
                   {filtered.slice(0, 60).map((r) => (
-                    <li key={r.id}>
+                    <li key={r.id} className="group relative">
                       <button
                         type="button"
                         onClick={() => onSelect(r.id)}
-                        onMouseEnter={() => setHoverId(r.id)}
-                        onMouseLeave={() => setHoverId(null)}
-                        className="flex w-full gap-3 px-4 py-3 text-left transition hover:bg-zinc-50 focus-visible:bg-zinc-50 focus-visible:outline-none dark:hover:bg-zinc-800/60 dark:focus-visible:bg-zinc-800/60"
+                        className="flex w-full gap-3 px-4 py-3 pr-10 text-left transition hover:bg-zinc-50 focus-visible:bg-zinc-50 focus-visible:outline-none dark:hover:bg-zinc-800/60 dark:focus-visible:bg-zinc-800/60"
                       >
                         <CategoryDot category={r.category} className="mt-1.5" />
                         <span className="min-w-0 flex-1">
@@ -426,7 +274,7 @@ export default function MapView({
                           </span>
                           <span className="mt-0.5 block truncate text-xs text-zinc-500 dark:text-zinc-400">
                             {r.raw_location_text ?? "Location pending"} ·{" "}
-                            {when(r)}
+                            {when(r, now)}
                           </span>
                         </span>
                         {r.urgency === "high" && (
@@ -434,6 +282,16 @@ export default function MapView({
                             Urgent
                           </span>
                         )}
+                      </button>
+                      {/* Demo cleanup: only appears on hover */}
+                      <button
+                        type="button"
+                        onClick={() => onDelete(r.id)}
+                        aria-label={`Delete message: ${r.description}`}
+                        title="Delete"
+                        className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1.5 text-zinc-400 opacity-0 transition group-hover:opacity-100 hover:bg-zinc-100 hover:text-red-600 focus-visible:opacity-100 dark:hover:bg-zinc-800 dark:hover:text-red-400"
+                      >
+                        <TrashIcon width={15} height={15} />
                       </button>
                     </li>
                   ))}
@@ -456,10 +314,12 @@ function Detail({
   report: r,
   onClose,
   onAssign,
+  now,
 }: {
   report: Report;
   onClose: () => void;
   onAssign: (id: string, unit: string | null) => void;
+  now: number;
 }) {
   return (
     <div className="flex flex-1 flex-col overflow-y-auto">
@@ -481,13 +341,23 @@ function Detail({
         <div>
           <p className="text-base font-semibold">{r.description}</p>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-zinc-600 dark:text-zinc-400">
-            <PinIcon width={14} height={14} />{" "}
+            <PinIcon width={14} height={14} className="shrink-0" />{" "}
             {r.raw_location_text ?? "Location pending"}
           </p>
+          {r.latitude != null && (
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                GPS:
+              </span>{" "}
+              {r.latitude.toFixed(5)}, {r.longitude!.toFixed(5)}
+              {r.accuracy ? ` · ±${Math.round(r.accuracy)} m` : ""}
+              {r.gpsAddress && r.gpsAddress !== r.raw_location_text
+                ? ` · near ${r.gpsAddress}`
+                : ""}
+            </p>
+          )}
           <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-            {when(r)}
-            {r.latitude != null &&
-              ` · ${r.latitude.toFixed(4)}, ${r.longitude!.toFixed(4)}`}
+            {when(r, now)}
           </p>
         </div>
 
@@ -498,14 +368,15 @@ function Detail({
           <p className="mt-1 text-sm leading-relaxed">“{r.transcript}”</p>
           {r.audioUrl ? (
             <audio controls src={r.audioUrl} className="mt-3 h-10 w-full" />
-          ) : (
+          ) : r.sizeKb ? (
             <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-              Voice memo · {r.sizeKb} KB · {r.durationSec}s
+              Voice memo · {r.sizeKb} KB
+              {r.durationSec ? ` · ${r.durationSec}s` : ""}
             </p>
-          )}
+          ) : null}
           {r.classifiedOnDevice && (
             <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
-              Sorted on-device — awaiting Grok re-check.
+              Sorted by keyword triage (Grok unavailable for this message).
             </p>
           )}
         </div>

@@ -141,8 +141,8 @@ function BandwidthCompare() {
     },
     {
       label: "CallForHelp voice message",
-      kb: 3.8,
-      note: "12 kbps Opus, mono, silence trimmed",
+      kb: 12,
+      note: "~8 s of speech · 12 kbps Opus, mono",
       ours: true,
     },
   ];
@@ -178,8 +178,8 @@ function BandwidthCompare() {
         ))}
       </ul>
       <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-900 dark:bg-red-950/50 dark:text-red-100">
-        <strong>126× smaller</strong> than a call — 5,184 messages used just
-        19.7 MB of satellite bandwidth.
+        <strong>40× smaller</strong> than a call — 5,184 messages used just 62
+        MB of satellite bandwidth.
       </p>
     </section>
   );
@@ -273,7 +273,7 @@ export default function AnalyticsView() {
     { label: "Messages received", value: s.messagesReceived.toLocaleString() },
     { label: "Rescues completed", value: s.rescuesCompleted.toLocaleString() },
     { label: "Median dispatch", value: "6m 42s" },
-    { label: "Bandwidth used", value: "19.7 MB" },
+    { label: "Bandwidth used", value: "62 MB" },
   ];
   return (
     <div className="space-y-6">

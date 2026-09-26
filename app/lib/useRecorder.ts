@@ -50,6 +50,7 @@ export function useRecorder(opts: {
   maxSeconds: number;
   autoStopOnSilence: boolean;
   shareLocation: boolean;
+  lang?: string;
   onComplete: (r: Recording) => void;
 }) {
   const [status, setStatus] = useState<RecorderStatus>("idle");
@@ -61,6 +62,7 @@ export function useRecorder(opts: {
   const [transcript, setTranscript] = useState("");
   const [liveCaptions, setLiveCaptions] = useState(true);
   const [coords, setCoords] = useState<Recording["coords"]>(null);
+  const [geoError, setGeoError] = useState<string | null>(null);
 
   const optsRef = useRef(opts);
   useEffect(() => {
@@ -79,6 +81,7 @@ export function useRecorder(opts: {
   const finalTextRef = useRef("");
   const interimRef = useRef("");
   const coordsRef = useRef<Recording["coords"]>(null);
+  const coordsPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const activeRef = useRef(false);
 
   const cleanup = useCallback(() => {
@@ -105,6 +108,8 @@ export function useRecorder(opts: {
     setTranscript("");
     setElapsed(0);
     setCoords(null);
+    setGeoError(null);
+    coordsPromiseRef.current = Promise.resolve();
     finalTextRef.current = "";
     interimRef.current = "";
     coordsRef.current = null;
@@ -123,18 +128,30 @@ export function useRecorder(opts: {
 
     // Location is requested in parallel so it never delays the recording.
     if (optsRef.current.shareLocation && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (p) => {
-          coordsRef.current = {
-            lat: p.coords.latitude,
-            lng: p.coords.longitude,
-            accuracy: p.coords.accuracy,
-          };
-          setCoords(coordsRef.current);
-        },
-        () => {},
-        { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
-      );
+      coordsPromiseRef.current = new Promise<void>((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (p) => {
+            coordsRef.current = {
+              lat: p.coords.latitude,
+              lng: p.coords.longitude,
+              accuracy: p.coords.accuracy,
+            };
+            setCoords(coordsRef.current);
+            resolve();
+          },
+          (err) => {
+            setGeoError(
+              err.code === err.PERMISSION_DENIED
+                ? "Location is blocked — allow it in your browser so responders can find you."
+                : "Couldn't get a GPS fix — responders will use the address you said.",
+            );
+            resolve();
+          },
+          { enableHighAccuracy: true, timeout: 15_000, maximumAge: 30_000 },
+        );
+      });
+    } else if (optsRef.current.shareLocation) {
+      setGeoError("This device can't share its location.");
     }
 
     let stream: MediaStream;
@@ -167,7 +184,7 @@ export function useRecorder(opts: {
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       const durationSec = (performance.now() - startedAtRef.current) / 1000;
       const type = recorder.mimeType || mimeType || "audio/webm";
       const blob = new Blob(chunksRef.current, { type });
@@ -179,6 +196,13 @@ export function useRecorder(opts: {
       setLevel(0);
       setSpeaking(false);
       setBars(Array(BAR_COUNT).fill(0));
+      // Give a slow GPS fix a few more seconds so the pin is exact.
+      if (!coordsRef.current) {
+        await Promise.race([
+          coordsPromiseRef.current,
+          new Promise((r) => setTimeout(r, 6000)),
+        ]);
+      }
       optsRef.current.onComplete({
         blob,
         url: URL.createObjectURL(blob),
@@ -198,6 +222,8 @@ export function useRecorder(opts: {
         .webkitAudioContext;
     const ctx = new AudioCtx();
     ctxRef.current = ctx;
+    // Safari (and Chrome without a fresh tap) can start the context suspended.
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.6;
@@ -265,7 +291,7 @@ export function useRecorder(opts: {
       const recog = new SR();
       recog.continuous = true;
       recog.interimResults = true;
-      recog.lang = "en-US";
+      recog.lang = optsRef.current.lang ?? "en-US";
       recog.onresult = (e) => {
         let interim = "";
         for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -312,6 +338,7 @@ export function useRecorder(opts: {
     transcript,
     liveCaptions,
     coords,
+    geoError,
     start,
     stop,
   };

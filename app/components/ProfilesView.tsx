@@ -68,7 +68,7 @@ function Chip({
   );
 }
 
-function PersonInNeed() {
+export function PersonInNeed() {
   return (
     <article className={card} aria-labelledby="victim-name">
       <div className="flex items-start gap-4 p-5">
@@ -168,7 +168,7 @@ function PersonInNeed() {
   );
 }
 
-function FirstResponder() {
+export function FirstResponder() {
   return (
     <article className={card} aria-labelledby="responder-name">
       <div className="flex items-start gap-4 p-5">
