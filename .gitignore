@@ -42,3 +42,6 @@ next-env.d.ts
 
 # local report database
 reports.db
+
+# downloaded speech model (Whisper)
+.cache/

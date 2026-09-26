@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Shell, {
   Toast,
   type NavItem,
@@ -22,7 +22,7 @@ import {
   UsersIcon,
 } from "@/app/components/icons";
 import { DEMO_HOME, NOTIFICATIONS, type Report } from "@/app/lib/data";
-import { getCurrentLocation } from "@/app/lib/location";
+import { useLiveLocation } from "@/app/lib/useLiveLocation";
 import { fetchReport } from "@/app/lib/api";
 import { setTheme, useTheme } from "@/app/lib/theme";
 
@@ -73,15 +73,21 @@ export default function CivilianDashboard() {
     [],
   );
 
-  // Where to place you for Family Circle check-ins.
+  // Your real position, watched from the moment the app opens.
   const { shareLocation, demoLocation } = settings;
+  const live = useLiveLocation(shareLocation && !demoLocation);
+  const { waitForFix } = live;
   const locate = useCallback(async () => {
     if (!shareLocation) return null;
     if (demoLocation) return { ...DEMO_HOME };
-    return getCurrentLocation();
-  }, [shareLocation, demoLocation]);
+    return waitForFix(8000);
+  }, [shareLocation, demoLocation, waitForFix]);
 
-  const family = useFamilyCircle(pushNotice, locate);
+  const myPosition = useMemo(
+    () => (live.coords ? { ...live.coords, address: live.address } : null),
+    [live.coords, live.address],
+  );
+  const family = useFamilyCircle(pushNotice, locate, myPosition);
   const { markSOS, markAssigned, setMyLocation } = family;
 
   const addReport = useCallback(
@@ -192,6 +198,7 @@ export default function CivilianDashboard() {
           onCheckInSafe={family.checkInSafe}
           safeStatus={family.safeStatus}
           onOpenFamily={() => setTab("family")}
+          location={live}
         />
       </div>
       <div hidden={tab !== "family"}>

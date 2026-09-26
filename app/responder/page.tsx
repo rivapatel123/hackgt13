@@ -32,6 +32,7 @@ import { SEED_REPORTS, type Report } from "@/app/lib/data";
 import { assignReport, deleteReport, fetchReports } from "@/app/lib/api";
 import { setTheme, useTheme } from "@/app/lib/theme";
 import { useNow } from "@/app/lib/useNow";
+import { locationHelp, useLiveLocation } from "@/app/lib/useLiveLocation";
 
 type Tab = "map" | "analytics" | "profiles" | "settings";
 
@@ -95,6 +96,8 @@ export default function ResponderDashboard() {
   const [feedError, setFeedError] = useState(false);
   const theme = useTheme();
   const now = useNow();
+  // The responder's own position, for "you are here" and distances.
+  const myLocation = useLiveLocation(true);
 
   const seen = useRef<Set<string> | null>(null);
   const deleted = useRef<Set<string>>(new Set());
@@ -252,6 +255,10 @@ export default function ResponderDashboard() {
           onSelect={setSelectedId}
           onAssign={assign}
           onDelete={remove}
+          me={{
+            coords: myLocation.coords,
+            help: locationHelp(myLocation.status),
+          }}
           now={now}
         />
       )}
@@ -279,7 +286,7 @@ export default function ResponderDashboard() {
             <UrgencyBadge urgency={incoming.urgency} />
           </div>
           <p className="mt-2 line-clamp-3 text-zinc-700 dark:text-zinc-300">
-            “{incoming.transcript}”
+            “{incoming.transcriptEn ?? incoming.transcript}”
           </p>
           <button
             type="button"

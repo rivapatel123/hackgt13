@@ -4,6 +4,11 @@ import { transcribeAudio, parseReport, grokConfigured } from "@/app/lib/grok";
 import { geocode, reverseGeocode } from "@/app/lib/geocode";
 import { db, REPORT_COLUMNS } from "@/app/lib/db";
 import {
+  SPEECH_LANGS,
+  transcribeAndTranslate,
+  type SpeechLang,
+} from "@/app/lib/speech";
+import {
   classifyLocally,
   detectHazard,
   extractAddress,
@@ -32,6 +37,15 @@ export async function POST(req: NextRequest) {
   const name = str(formData.get("name"));
   const source = str(formData.get("source")) ?? "voice";
   const durationSec = Number(formData.get("duration")) || null;
+  // Language the caller's device guessed / the caller picked in Settings.
+  const langHint = str(formData.get("language"));
+  const clientLang = (SPEECH_LANGS as readonly string[]).includes(
+    langHint ?? "",
+  )
+    ? (langHint as SpeechLang)
+    : null;
+  const forcedLang =
+    formData.get("language_forced") === "1" ? clientLang : null;
 
   if (!audio && !clientTranscript) {
     return NextResponse.json(
@@ -42,43 +56,61 @@ export async function POST(req: NextRequest) {
 
   const buffer = audio ? Buffer.from(await audio.arrayBuffer()) : null;
 
-  // 1) Transcribe with Grok when possible; fall back to the live captions.
+  // 1) Transcribe on the server with Whisper: detects en/fr/zh/es, transcribes
+  //    in that language, and translates to English. Falls back to Grok, then
+  //    to the phone's live captions.
   let transcript = clientTranscript ?? "";
-  let classifiedBy = "keywords";
-  if (buffer && grokConfigured) {
+  let english = transcript;
+  let language: SpeechLang | null = clientLang ?? null;
+  if (buffer) {
     try {
-      transcript = await transcribeAudio(
-        buffer,
-        audio!.name,
-        audio!.type || "audio/webm",
-      );
+      const r = await transcribeAndTranslate(buffer, forcedLang);
+      if (r.text) {
+        transcript = r.text;
+        english = r.english || r.text;
+        language = r.language;
+      }
     } catch (e) {
-      console.warn(
-        "[reports] transcription fell back to client captions:",
-        (e as Error).message,
-      );
+      console.warn("[reports] Whisper unavailable:", (e as Error).message);
+      if (grokConfigured) {
+        try {
+          transcript = await transcribeAudio(
+            buffer,
+            audio!.name,
+            audio!.type || "audio/webm",
+          );
+          english = transcript;
+        } catch (e2) {
+          console.warn(
+            "[reports] Grok transcription failed:",
+            (e2 as Error).message,
+          );
+        }
+      }
     }
   }
 
-  // 2) Categorize with Grok when possible; fall back to keyword triage.
-  const local = classifyLocally(transcript);
+  // 2) Categorize (from the English translation, plus the original words).
+  let classifiedBy = "keywords";
+  const both = `${english} ${transcript === english ? "" : transcript}`;
+  const local = classifyLocally(both);
   let parsed = {
     category: local.category as string,
     urgency: local.urgency as string,
-    description: transcript
-      ? summarize(transcript)
+    description: english
+      ? summarize(english)
       : "Voice message (no transcript yet)",
-    location_text: extractAddress(transcript),
-    hazard: detectHazard(transcript)?.key ?? null,
+    location_text: extractAddress(english) ?? extractAddress(transcript),
+    hazard: detectHazard(both)?.key ?? null,
   };
-  if (transcript && grokConfigured && categoryHint !== "safe") {
+  if (english && grokConfigured && categoryHint !== "safe") {
     try {
-      const g = await parseReport(transcript);
+      const g = await parseReport(english);
       parsed = {
         category: g.category ?? parsed.category,
         urgency: g.urgency ?? parsed.urgency,
         description: g.description ?? parsed.description,
-        location_text: g.location_text ?? null,
+        location_text: g.location_text ?? parsed.location_text,
         hazard: isHazardKey(g.hazard) ? g.hazard : parsed.hazard,
       };
       classifiedBy = "grok";
@@ -117,8 +149,9 @@ export async function POST(req: NextRequest) {
   const id = randomUUID();
   db.prepare(
     `INSERT INTO reports (id, transcript, category, urgency, description, raw_location_text, latitude, longitude,
-       hazard, audio, audio_mime, size_kb, duration_sec, name, source, classified_by, accuracy_m, gps_address)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       hazard, audio, audio_mime, size_kb, duration_sec, name, source, classified_by, accuracy_m, gps_address,
+       language, transcript_en)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     transcript,
@@ -140,6 +173,8 @@ export async function POST(req: NextRequest) {
     classifiedBy,
     gpsLat ? accuracy : null,
     gpsAddress,
+    language,
+    language && language !== "en" ? english : null,
   );
 
   const report = db

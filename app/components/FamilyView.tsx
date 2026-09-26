@@ -199,6 +199,8 @@ export function useFamilyCircle(
     tone: "good" | "critical" | "info",
   ) => void,
   locate: () => Promise<Coords | null>,
+  // Your live GPS position (null in demo mode or while locating).
+  myPosition: (Coords & { address: string | null }) | null = null,
 ) {
   const [members, setMembers] = useState<Member[]>(INITIAL_MEMBERS);
   const [feed, setFeed] = useState<FeedItem[]>(INITIAL_FEED);
@@ -397,8 +399,32 @@ export function useFamilyCircle(
     [log, members],
   );
 
+  // Show "You" (and the people with you) wherever your phone is right now.
+  const shownMembers = useMemo(() => {
+    if (!myPosition) return members;
+    const { lat, lng, accuracy, address } = myPosition;
+    return members.map((m) =>
+      m.id === "me"
+        ? {
+            ...m,
+            lat,
+            lng,
+            accuracy,
+            place: address ? `Near ${address}` : "Your current location",
+          }
+        : m.withMe
+          ? {
+              ...m,
+              lat,
+              lng,
+              place: address ? `With you · near ${address}` : "With you",
+            }
+          : m,
+    );
+  }, [members, myPosition]);
+
   return {
-    members,
+    members: shownMembers,
     feed,
     safeStatus,
     setMyLocation,

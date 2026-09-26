@@ -2,24 +2,27 @@
 
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   CATEGORIES,
   DEMO_HOME,
   HAZARDS,
   INCIDENT_STATS,
+  LANGS,
   classifyLocally,
   detectHazard,
+  deviceLanguage,
+  isLangKey,
   type HazardKey,
+  type LangKey,
   type Report,
 } from "@/app/lib/data";
+import type { Coords } from "@/app/lib/location";
+import { locationHelp, type LiveLocation } from "@/app/lib/useLiveLocation";
 import { postReport } from "@/app/lib/api";
 import { useRecorder, type Recording } from "@/app/lib/useRecorder";
-import {
-  LANGUAGE_CODES,
-  type AppSettings,
-} from "@/app/components/SettingsView";
+import type { AppSettings } from "@/app/components/SettingsView";
 import {
   AlertIcon,
   CheckIcon,
@@ -45,6 +48,7 @@ type Submission = {
   report: Report | null;
   stage: Stage;
   error: string | null;
+  coords: Coords | null; // location that was sent with the message
 };
 
 const PROMPTS = [
@@ -53,21 +57,21 @@ const PROMPTS = [
     label: "Who you are",
     hint: "Your name and how many people are with you",
     example: "“This is Maria, there are 3 of us…”",
-    test: /\b(my name|this is|i'?m [a-z]+|i am|name'?s|there (are|is) \w+ of us|with my)\b/i,
+    test: /\b(my name|this is|i'?m [a-z]+|i am|name'?s|there (are|is) \w+ of us|with my)\b|je m'appelle|c'est \w+|je suis|nous sommes|me llamo|mi nombre|soy \w+|somos|estoy con|我叫|我是|我们有|我们.{0,3}个人/i,
   },
   {
     key: "where",
     label: "Where you are",
     hint: "Street address, landmark, or floor",
     example: "“…at 412 Bayshore Blvd, second floor…”",
-    test: /\b(\d{2,}|street|st\b|avenue|ave\b|road|rd\b|blvd|boulevard|drive|near|floor|apartment|apt|building|highway|hwy|corner|behind|next to)\b/i,
+    test: /\b(\d{2,}|street|st\b|avenue|ave\b|road|rd\b|blvd|boulevard|drive|near|floor|apartment|apt|building|highway|hwy|corner|behind|next to)\b|\d{2,}|\brue\b|étage|près d|à côté|calle|avenida|\bpiso\b|cerca de|al lado|número|路|街|号|楼|层|附近/i,
   },
   {
     key: "what",
     label: "What you need",
     hint: "Medical help, water, rescue, shelter — or that you're safe",
     example: "“…my husband is hurt and we need a boat.”",
-    test: /\b(need|help|hurt|injur|bleed|water|food|trapped|stuck|shelter|missing|medic|insulin|oxygen|rescue|boat|safe|okay)\b/i,
+    test: /\b(need|help|hurt|injur|bleed|water|food|trapped|stuck|shelter|missing|medic|insulin|oxygen|rescue|boat|safe|okay)\b|besoin|aide|blessé|de l'eau|nourriture|coincé|secours|bateau|en sécurité|necesit|ayuda|herid|agua|comida|atrapad|rescate|\bbote\b|a salvo|需要|帮助|救命|受伤|食物|被困|救援|船|安全/i,
   },
 ] as const;
 
@@ -78,7 +82,9 @@ export default function EmergencyView({
   onCheckInSafe,
   safeStatus,
   onOpenFamily,
+  location,
 }: {
+  location: LiveLocation;
   settings: AppSettings;
   myReports: Report[];
   onReport: (r: Report, replaceId?: string) => void;
@@ -91,6 +97,16 @@ export default function EmergencyView({
   const [manualHazard, setManualHazard] = useState<HazardKey | "none" | null>(
     null,
   );
+
+  // Spoken language: auto-detected from the first seconds of speech (or locked in Settings).
+  const [lang, setLang] = useState<{
+    key: LangKey;
+    source: "device" | "detected" | "manual";
+    confidence?: number;
+  } | null>(null);
+  const langRef = useRef<LangKey | null>(null);
+  const lastDetected = useRef<LangKey | null>(null);
+  const probe = useRef({ count: 0, busy: false });
 
   const hazardFor = useCallback(
     (text: string): HazardKey | null => {
@@ -109,6 +125,7 @@ export default function EmergencyView({
         report: null,
         stage: "sending",
         error: null,
+        coords: null,
       });
       const ext = rec.mimeType.includes("mp4")
         ? "m4a"
@@ -122,11 +139,12 @@ export default function EmergencyView({
           type: rec.mimeType,
         }),
       );
-      const coords = !settings.shareLocation
+      // Real GPS from the live location watcher (waits briefly for a first fix).
+      const coords: Coords | null = !settings.shareLocation
         ? null
         : settings.demoLocation
           ? DEMO_HOME
-          : rec.coords;
+          : (location.coords ?? (await location.waitForFix(6000)));
       if (coords) {
         fd.append("lat", String(coords.lat));
         fd.append("lng", String(coords.lng));
@@ -139,6 +157,8 @@ export default function EmergencyView({
       fd.append("duration", String(Math.round(rec.durationSec)));
       fd.append("name", "Maria Delgado");
       fd.append("source", "voice");
+      if (langRef.current) fd.append("language", langRef.current);
+      if (settings.language !== "auto") fd.append("language_forced", "1");
 
       // Play back the local copy instantly; the server keeps its own copy.
       const base = {
@@ -157,6 +177,8 @@ export default function EmergencyView({
           ...base,
           transcript: saved.transcript || rec.transcript,
         };
+        // Start the next recording in the language the server heard.
+        if (saved.language) lastDetected.current = saved.language;
       } catch (e) {
         // Keep the person's message even if the uplink or AI is unavailable.
         const guess = classifyLocally(rec.transcript);
@@ -180,22 +202,30 @@ export default function EmergencyView({
           latitude: coords?.lat ?? null,
           longitude: coords?.lng ?? null,
           accuracy: settings.demoLocation ? null : (coords?.accuracy ?? null),
+          language: langRef.current,
           created_at: new Date().toISOString(),
           classifiedOnDevice: true,
         };
       }
       onReport(report, replaceId);
-      setSubmission({ recording: rec, report, stage: "done", error });
+      setSubmission({ recording: rec, report, stage: "done", error, coords });
     },
-    [hazardFor, onReport, settings.shareLocation, settings.demoLocation],
+    [
+      hazardFor,
+      onReport,
+      location,
+      settings.shareLocation,
+      settings.demoLocation,
+      settings.language,
+    ],
   );
 
   const recorder = useRecorder({
     bitrate: settings.bitrate,
     maxSeconds: 45,
     autoStopOnSilence: settings.autoStopOnSilence,
-    shareLocation: settings.shareLocation && !settings.demoLocation,
-    lang: LANGUAGE_CODES[settings.language] ?? "en-US",
+    // Location comes from the live watcher above, not a separate request.
+    shareLocation: false,
     onComplete: send,
   });
 
@@ -215,9 +245,66 @@ export default function EmergencyView({
     else if (!requesting) {
       setSubmission(null);
       setManualHazard(null);
-      recorder.start();
+      // Start captions in the locked language, the last one we heard, or the device's.
+      const first: LangKey =
+        settings.language !== "auto"
+          ? settings.language
+          : (lastDetected.current ?? deviceLanguage());
+      langRef.current = first;
+      setLang({
+        key: first,
+        source: settings.language !== "auto" ? "manual" : "device",
+      });
+      probe.current = { count: 0, busy: false };
+      recorder.start(LANGS[first].speech);
     }
   };
+
+  // Auto-detect: after ~3 s of speech, send what we have to Whisper to find the
+  // language; if it differs, switch live captions to it. Check once more at
+  // ~8 s if the first answer wasn't confident.
+  const { elapsed, heardVoice, snapshot, switchLang } = recorder;
+  useEffect(() => {
+    if (!recording || settings.language !== "auto" || !heardVoice) return;
+    const p = probe.current;
+    const lowConfidence = (lang?.confidence ?? 0) < 0.8;
+    const due =
+      (p.count === 0 && elapsed >= 3.5) ||
+      (p.count === 1 && lowConfidence && elapsed >= 8);
+    if (!due || p.busy) return;
+    const blob = snapshot();
+    if (!blob) return;
+    p.busy = true;
+    p.count += 1;
+    const fd = new FormData();
+    fd.append("audio", new File([blob], "probe.webm", { type: blob.type }));
+    fetch("/api/detect-language", { method: "POST", body: fd })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || !isLangKey(d.language)) return;
+        if (d.language !== langRef.current)
+          switchLang(LANGS[d.language as LangKey].speech);
+        langRef.current = d.language;
+        lastDetected.current = d.language;
+        setLang({
+          key: d.language,
+          source: "detected",
+          confidence: d.confidence,
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        p.busy = false;
+      });
+  }, [
+    recording,
+    elapsed,
+    heardVoice,
+    snapshot,
+    switchLang,
+    settings.language,
+    lang?.confidence,
+  ]);
 
   // The voice guess updates live as the caller talks.
   const detection =
@@ -434,6 +521,40 @@ export default function EmergencyView({
               ))}
             </div>
 
+            {/* Spoken language */}
+            {lang && (recording || submission) && (
+              <p
+                aria-live="polite"
+                className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              >
+                <span aria-hidden="true">🌐</span>
+                {lang.source === "detected" ? (
+                  <>
+                    Language detected:{" "}
+                    <strong className="text-zinc-900 dark:text-white">
+                      {LANGS[lang.key].native}
+                    </strong>
+                    {lang.confidence
+                      ? ` · ${Math.round(lang.confidence * 100)}% sure`
+                      : ""}
+                  </>
+                ) : lang.source === "manual" ? (
+                  <>
+                    Listening in{" "}
+                    <strong className="text-zinc-900 dark:text-white">
+                      {LANGS[lang.key].native}
+                    </strong>{" "}
+                    (set in Settings)
+                  </>
+                ) : (
+                  <>
+                    Listening in {LANGS[lang.key].native} — detecting your
+                    language…
+                  </>
+                )}
+              </p>
+            )}
+
             {/* Live captions */}
             <div
               aria-live="polite"
@@ -563,15 +684,10 @@ export default function EmergencyView({
                 ? { ...submission, report: latest }
                 : submission
             }
-            coords={
-              !settings.shareLocation
-                ? null
-                : settings.demoLocation
-                  ? DEMO_HOME
-                  : (submission?.recording.coords ?? recorder.coords)
-            }
+            coords={submission?.coords ?? null}
             demo={settings.demoLocation}
-            geoError={settings.demoLocation ? null : recorder.geoError}
+            location={location}
+            shareLocation={settings.shareLocation}
             onRetry={() =>
               submission && send(submission.recording, submission.report?.id)
             }
@@ -634,43 +750,24 @@ function DeliveryCard({
   submission,
   coords,
   demo,
-  geoError,
+  location,
+  shareLocation,
   onRetry,
 }: {
   submission: Submission | null;
-  coords: Recording["coords"];
+  coords: Coords | null;
   demo: boolean;
-  geoError: string | null;
+  location: LiveLocation;
+  shareLocation: boolean;
   onRetry: () => void;
 }) {
   if (!submission) {
     return (
-      <section className="rounded-2xl border border-dashed border-zinc-300 bg-white/60 p-5 dark:border-zinc-700 dark:bg-zinc-900/60">
-        <h2 className="text-lg font-semibold">After you speak</h2>
-        <ul className="mt-3 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
-          <li className="flex items-center gap-2">
-            <WaveIcon width={16} height={16} /> Your voice is compressed to a
-            few kilobytes
-          </li>
-          <li className="flex items-center gap-2">
-            <SatelliteIcon width={16} height={16} /> Sent over satellite with
-            your GPS location
-          </li>
-          <li className="flex items-center gap-2">
-            <PinIcon width={16} height={16} /> Grok transcribes it and pins it
-            for responders
-          </li>
-        </ul>
-        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-500">
-          {geoError
-            ? geoError
-            : coords
-              ? demo
-                ? "Using the demo location (412 Bayshore Blvd)."
-                : `GPS locked · ±${Math.round(coords.accuracy)} m`
-              : "Your GPS location is captured when you tap SOS."}
-        </p>
-      </section>
+      <LocationCard
+        location={location}
+        demo={demo}
+        shareLocation={shareLocation}
+      />
     );
   }
 
@@ -700,9 +797,7 @@ function DeliveryCard({
             ? demo
               ? "with demo location"
               : `with GPS · ±${Math.round(coords.accuracy)} m`
-            : geoError
-              ? "GPS blocked · using your words"
-              : "location from your words",
+            : "no GPS fix · using your words",
           state: done ? "done" : "active",
         },
     failed
@@ -712,9 +807,12 @@ function DeliveryCard({
           state: "done",
         }
       : {
-          label: report?.classifiedOnDevice
-            ? "Transcribed & sorted"
-            : "Transcribed & sorted by Grok",
+          label:
+            report?.language && report.language !== "en"
+              ? `Heard ${LANGS[report.language].native} · translated`
+              : report?.classifiedOnDevice
+                ? "Transcribed & sorted"
+                : "Transcribed & sorted by Grok",
           detail: report ? CATEGORIES[report.category].label : "…",
           state: done ? "done" : "waiting",
         },
@@ -821,6 +919,15 @@ function DeliveryCard({
           <p className="text-sm text-zinc-700 dark:text-zinc-300">
             “{report.transcript}”
           </p>
+          {report.transcriptEn && (
+            <p className="rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300">
+              <span className="block text-xs font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+                {report.language ? `${LANGS[report.language].english} → ` : ""}
+                English for responders
+              </span>
+              “{report.transcriptEn}”
+            </p>
+          )}
           {error && (
             <p className="text-xs text-amber-700 dark:text-amber-400">
               Uplink unavailable ({error}). Your recording is saved on this
@@ -966,5 +1073,112 @@ function YourLocation({ report, demo }: { report: Report; demo: boolean }) {
         </span>
       </p>
     </div>
+  );
+}
+
+function LocationCard({
+  location,
+  demo,
+  shareLocation,
+}: {
+  location: LiveLocation;
+  demo: boolean;
+  shareLocation: boolean;
+}) {
+  const coords = !shareLocation ? null : demo ? DEMO_HOME : location.coords;
+  const pins = useMemo<MapPin[]>(
+    () =>
+      coords
+        ? [
+            {
+              kind: "avatar",
+              id: "me",
+              lat: coords.lat,
+              lng: coords.lng,
+              initials: "MD",
+              label: "You",
+              ring: "#2a78d6",
+              accuracy: demo ? null : coords.accuracy,
+            },
+          ]
+        : [],
+    [coords, demo],
+  );
+  const help = demo ? null : locationHelp(location.status);
+  return (
+    <section
+      aria-labelledby="loc-title"
+      className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+    >
+      <div className="flex items-center justify-between gap-2 px-5 pt-4 pb-3">
+        <h2 id="loc-title" className="text-lg font-semibold">
+          Your location
+        </h2>
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
+            coords
+              ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+              : help
+                ? "bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          }`}
+        >
+          <span
+            className={`size-1.5 rounded-full ${coords ? "bg-emerald-500 motion-safe:animate-pulse" : help ? "bg-amber-500" : "bg-zinc-400 motion-safe:animate-pulse"}`}
+          />
+          {coords
+            ? demo
+              ? "Demo location"
+              : `GPS · ±${Math.round(coords.accuracy)} m`
+            : help
+              ? "Not available"
+              : "Finding you…"}
+        </span>
+      </div>
+      {coords ? (
+        <LeafletMap
+          ariaLabel="Map showing where you are right now"
+          className="h-48"
+          pins={pins}
+          fitKey={`${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`}
+          maxFitZoom={16}
+        />
+      ) : (
+        <div className="grid h-48 place-items-center bg-zinc-50 px-6 text-center text-sm text-zinc-500 dark:bg-zinc-800/40 dark:text-zinc-400">
+          {help ?? "Waiting for your device's GPS…"}
+        </div>
+      )}
+      <div className="flex items-start justify-between gap-3 px-5 py-3 text-sm">
+        <p className="text-zinc-600 dark:text-zinc-400">
+          {coords ? (
+            <>
+              <PinIcon
+                width={14}
+                height={14}
+                className="mr-1 inline align-[-2px]"
+              />
+              {demo
+                ? DEMO_HOME.label
+                : (location.address ??
+                  `${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`)}
+              <span className="block text-xs text-zinc-500">
+                Sent automatically with your SOS
+              </span>
+            </>
+          ) : (
+            "Responders will use the address you say out loud."
+          )}
+        </p>
+        {!demo && help && location.status !== "off" && (
+          <button
+            type="button"
+            onClick={location.retry}
+            className="shrink-0 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-semibold hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          >
+            Try again
+          </button>
+        )}
+      </div>
+    </section>
   );
 }

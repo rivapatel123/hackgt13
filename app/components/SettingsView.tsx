@@ -2,33 +2,25 @@
 
 import type { ReactNode } from "react";
 import type { ThemeChoice } from "@/app/lib/theme";
+import { LANGS, type LangKey } from "@/app/lib/data";
 
 export type AppSettings = {
   bitrate: number;
   autoStopOnSilence: boolean;
   shareLocation: boolean;
   shareMedicalId: boolean;
-  language: string;
+  language: "auto" | LangKey;
   autoDetectHazard: boolean;
   demoLocation: boolean;
 };
 
-// Speech-recognition locale for each spoken-language option.
-export const LANGUAGE_CODES: Record<string, string> = {
-  English: "en-US",
-  Español: "es-US",
-  "Kreyòl ayisyen": "ht-HT",
-  "Tiếng Việt": "vi-VN",
-  中文: "zh-CN",
-  Português: "pt-BR",
-};
 
 export const DEFAULT_SETTINGS: AppSettings = {
   bitrate: 12_000,
   autoStopOnSilence: true,
   shareLocation: true,
   shareMedicalId: true,
-  language: "English",
+  language: "auto",
   autoDetectHazard: true,
   demoLocation: false,
 };
@@ -246,22 +238,24 @@ export default function SettingsView({
           </Row>
           <Row
             title="Spoken language"
-            desc="Sets the language for live captions and voice detection."
+            desc="Auto-detect listens for English, French, Mandarin or Spanish and switches for you. Pick one to lock it."
           >
             <select
               value={settings.language}
-              onChange={(e) => set("language", e.target.value)}
+              onChange={(e) =>
+                set("language", e.target.value as AppSettings["language"])
+              }
+              aria-label="Spoken language"
               className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
             >
-              {[
-                "English",
-                "Español",
-                "Kreyòl ayisyen",
-                "Tiếng Việt",
-                "中文",
-                "Português",
-              ].map((l) => (
-                <option key={l}>{l}</option>
+              <option value="auto">Auto-detect (recommended)</option>
+              {(Object.keys(LANGS) as LangKey[]).map((k) => (
+                <option key={k} value={k}>
+                  {LANGS[k].native}
+                  {LANGS[k].native !== LANGS[k].english
+                    ? ` — ${LANGS[k].english}`
+                    : ""}
+                </option>
               ))}
             </select>
           </Row>

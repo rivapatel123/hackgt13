@@ -25,6 +25,8 @@ export type Report = {
   longitude: number | null;
   accuracy?: number | null; // GPS accuracy radius in metres
   gpsAddress?: string | null; // street address for the GPS fix
+  language?: LangKey | null; // spoken language (auto-detected)
+  transcriptEn?: string | null; // English translation when not spoken in English
   created_at: string;
   hazard?: HazardKey | null;
   name?: string;
@@ -215,6 +217,42 @@ const HAZARD_CUES: Record<HazardKey, [RegExp, number, string][]> = {
  * Guess which disaster the caller is describing from their words.
  * Returns null until there's enough signal (score >= 3) to be useful.
  */
+// Same idea for French, Spanish and Mandarin (no \b: it doesn't work with
+// accented letters or Chinese characters). The cue shown is the word heard.
+const HAZARD_CUES_INTL: Record<HazardKey, [RegExp, number][]> = {
+  hurricane: [
+    [/ouragan|huracán|huracan|飓风|台风/, 5],
+    [/tempête|tormenta|暴风|风暴/, 2],
+    [/vents? violents?|viento|大风/, 2],
+  ],
+  flood: [
+    [/inondation|inondé|inundación|inundado|洪水|淹/, 5],
+    [/l['’]eau monte|el agua (está )?subiendo|el agua sube|水位|涨水|上涨/, 4],
+    [/bateau|bote|lancha|船/, 2],
+  ],
+  tornado: [[/tornade|龙卷风/, 6]],
+  earthquake: [
+    [/tremblement de terre|séisme|terremoto|sismo|地震/, 6],
+    [/secousse|ça tremble|temblor|tiembla|摇晃|晃动/, 4],
+    [/effondr|derrumb|倒塌|塌了/, 3],
+  ],
+  wildfire: [
+    [/incendie|incendio|山火|火灾|着火/, 5],
+    [/fumée|humo|浓烟|冒烟/, 3],
+    [/flammes|llamas|\bfeu\b|fuego/, 2],
+  ],
+  tsunami: [
+    [/raz-de-marée|maremoto|海啸/, 6],
+    [/vague géante|ola gigante|巨浪/, 4],
+  ],
+  volcano: [
+    [/volcan|volcán|火山/, 6],
+    [/\blave\b|岩浆/, 6],
+    [/éruption|erupción|喷发/, 5],
+    [/cendres|ceniza|火山灰/, 2],
+  ],
+};
+
 export function detectHazard(
   text: string,
 ): { key: HazardKey; score: number; cues: string[] } | null {
@@ -227,6 +265,13 @@ export function detectHazard(
       if (re.test(t)) {
         score += weight;
         cues.push(cue);
+      }
+    }
+    for (const [re, weight] of HAZARD_CUES_INTL[key]) {
+      const m = t.match(re);
+      if (m) {
+        score += weight;
+        if (!cues.includes(m[0])) cues.push(m[0]);
       }
     }
     if (score > (best?.score ?? 0)) best = { key, score, cues };
@@ -593,6 +638,35 @@ export function classifyLocally(text: string): {
       "oxygen",
       "unconscious",
       "medic",
+      // fr / es / zh
+      "blessé",
+      "saigne",
+      "insuline",
+      "respirer",
+      "douleur",
+      "enceinte",
+      "oxygène",
+      "inconscient",
+      "médecin",
+      "herido",
+      "herida",
+      "sangr",
+      "insulina",
+      "respirar",
+      "dolor",
+      "embarazada",
+      "oxígeno",
+      "inconsciente",
+      "médico",
+      "受伤",
+      "流血",
+      "胰岛素",
+      "呼吸",
+      "疼",
+      "怀孕",
+      "氧气",
+      "昏迷",
+      "医生",
     )
   )
     category = "medical";
@@ -604,15 +678,79 @@ export function classifyLocally(text: string): {
       "lost my",
       "looking for",
       "haven't heard",
+      "disparu",
+      "je ne trouve pas",
+      "desaparecid",
+      "no encuentro",
+      "失踪",
+      "找不到",
+      "走失",
     )
   )
     category = "missing_person";
   else if (
-    has("trapped", "attic", "water is rising", "flooding", "stuck", "boat")
+    has(
+      "fire",
+      "smoke",
+      "burning",
+      "fumée",
+      "incendie",
+      "humo",
+      "fuego",
+      "incendio",
+      "着火",
+      "火灾",
+      "烟",
+    )
+  )
+    category = "fire";
+  else if (
+    has(
+      "trapped",
+      "attic",
+      "water is rising",
+      "flooding",
+      "stuck",
+      "boat",
+      "coincé",
+      "piégé",
+      "l'eau monte",
+      "inond",
+      "bateau",
+      "atrapad",
+      "el agua sube",
+      "inund",
+      "bote",
+      "被困",
+      "困住",
+      "洪水",
+      "淹",
+      "船",
+    )
   )
     category = "flood";
-  else if (has("fire", "smoke", "burning")) category = "fire";
-  else if (has("water", "food", "hungry", "thirst", "formula", "supplies"))
+  else if (
+    has(
+      "water",
+      "food",
+      "hungry",
+      "thirst",
+      "formula",
+      "supplies",
+      "de l'eau",
+      "nourriture",
+      "faim",
+      "soif",
+      "agua",
+      "comida",
+      "hambre",
+      "食物",
+      "饿",
+      "渴",
+      "喝水",
+      "奶粉",
+    )
+  )
     category = "food_water";
   else if (
     has(
@@ -622,10 +760,35 @@ export function classifyLocally(text: string): {
       "house is gone",
       "destroyed",
       "nowhere",
+      "toit",
+      "détruit",
+      "refuge",
+      "techo",
+      "refugio",
+      "albergue",
+      "destruid",
+      "屋顶",
+      "避难",
+      "房子",
     )
   )
     category = "shelter";
-  else if (has("safe", "okay", "we're fine", "we are fine", "i'm fine"))
+  else if (
+    has(
+      "safe",
+      "okay",
+      "we're fine",
+      "we are fine",
+      "i'm fine",
+      "en sécurité",
+      "nous allons bien",
+      "a salvo",
+      "estamos bien",
+      "estoy bien",
+      "安全",
+      "没事",
+    )
+  )
     category = "safe";
   const urgency: Urgency =
     category === "safe"
@@ -639,9 +802,17 @@ export function classifyLocally(text: string): {
             "trapped",
             "bleeding",
             "rising",
+            "urgent",
+            "s'il vous plaît",
+            "por favor",
+            "rápido",
+            "救命",
+            "紧急",
+            "快",
           ) ||
           category === "medical" ||
-          category === "flood"
+          category === "flood" ||
+          category === "fire"
         ? "high"
         : "medium";
   return { category, urgency };
@@ -658,17 +829,31 @@ export const DEMO_HOME = {
 // ---- Fallback text helpers (used when Grok isn't available) ----
 
 const NEED_WORDS =
-  /\b(need|help|hurt|injur|bleed|broken|trapped|stuck|rising|flood|fire|smoke|missing|can'?t|insulin|oxygen|pregnan|boat|water|food|shelter|roof|collapsed|safe)\b/i;
+  /\b(need|help|hurt|injur\w*|bleed\w*|broken|trapped|stuck|rising|flood\w*|fire|smoke|missing|can'?t|insulin|oxygen|pregnan\w*|boat|water|food|shelter|roof|collapsed|safe|killed|dead|dying)\b/i;
 const INTRO = /^(this is|my name|hi|hello|it'?s \w+ here)\b/i;
 
 /** Pick the sentences that say what's wrong, for a short dispatcher title. */
 export function summarize(transcript: string, max = 90): string {
-  const sentences = transcript
-    .split(/(?<=[.!?])\s+/)
+  let sentences = transcript
+    .split(/(?<=[.!?。！？])\s*/)
     .map((s) => s.trim())
     .filter(Boolean);
-  const useful = sentences.filter((s) => NEED_WORDS.test(s) && !INTRO.test(s));
-  let text = (useful.length ? useful : sentences).join(" ");
+  // Run-on speech (common in translations): split into comma clauses instead.
+  if (sentences.length === 1 && sentences[0].length > max)
+    sentences = sentences[0]
+      .split(/,\s+/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+  const useful = sentences.filter(
+    (s) =>
+      NEED_WORDS.test(s) &&
+      !INTRO.test(s) &&
+      !/^(i am|i'm) (at|in|on)\b/i.test(s),
+  );
+  let text = (useful.length ? useful : sentences).join(
+    sentences.length && !/[.!?。！？]$/.test(sentences[0]) ? ", " : " ",
+  );
+  text = text.charAt(0).toUpperCase() + text.slice(1);
   if (text.length > max) {
     text = text.slice(0, max);
     text = `${text.slice(0, text.lastIndexOf(" ")).replace(/[,.;:]$/, "")}…`;
@@ -682,4 +867,25 @@ export function extractAddress(transcript: string): string | null {
     /\b\d{1,6}\s+(?:[A-Z][\w']*\s+){1,4}(?:Boulevard|Blvd|Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct|Highway|Hwy|Parkway|Pkwy|Place|Pl|Circle|Terrace)\b\.?/,
   );
   return m ? m[0].replace(/\.$/, "") : null;
+}
+
+// ---- Spoken languages (auto-detected) ----
+export const LANGS = {
+  en: { english: "English", native: "English", speech: "en-US" },
+  fr: { english: "French", native: "Français", speech: "fr-FR" },
+  zh: { english: "Mandarin", native: "中文 (普通话)", speech: "zh-CN" },
+  es: { english: "Spanish", native: "Español", speech: "es-US" },
+} as const;
+export type LangKey = keyof typeof LANGS;
+export const isLangKey = (v: unknown): v is LangKey =>
+  typeof v === "string" && v in LANGS;
+
+/** Best guess before anyone speaks: the device's own language, if supported. */
+export function deviceLanguage(): LangKey {
+  if (typeof navigator === "undefined") return "en";
+  for (const l of navigator.languages ?? [navigator.language]) {
+    const k = l.toLowerCase().slice(0, 2);
+    if (isLangKey(k)) return k;
+  }
+  return "en";
 }

@@ -5,12 +5,15 @@ import {
   CATEGORIES,
   DEMO_NOW,
   INCIDENT_STATS,
+  LANGS,
   RESPONDER_UNITS,
   timeAgo,
   type CategoryKey,
   type Report,
 } from "@/app/lib/data";
 import LeafletMap, { type MapPin } from "@/app/components/LeafletMap";
+import type { Coords } from "@/app/lib/location";
+import { distanceMetres } from "@/app/lib/useLiveLocation";
 import {
   CategoryBadge,
   CategoryDot,
@@ -39,7 +42,9 @@ export default function MapView({
   onAssign,
   onDelete,
   now,
+  me = null,
 }: {
+  me?: { coords: Coords | null; help: string | null } | null;
   reports: Report[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
@@ -67,6 +72,7 @@ export default function MapView({
         q
           ? [
               r.transcript,
+              r.transcriptEn,
               r.raw_location_text,
               r.description,
               r.name,
@@ -87,6 +93,7 @@ export default function MapView({
 
   const selected = reports.find((r) => r.id === selectedId) ?? null;
 
+  const myCoords = me?.coords ?? null;
   const pins = useMemo<MapPin[]>(
     () =>
       filtered
@@ -104,9 +111,26 @@ export default function MapView({
             pulse: !!r.live || (r.urgency === "high" && !r.assignedTo),
             tooltip: `${c.label} · ${r.description}`,
             accuracy: r.id === selectedId ? r.accuracy : null,
-          };
-        }),
-    [filtered, selectedId],
+          } as MapPin;
+        })
+        // The responder's own live position.
+        .concat(
+          myCoords
+            ? [
+                {
+                  kind: "avatar",
+                  id: "__me",
+                  lat: myCoords.lat,
+                  lng: myCoords.lng,
+                  initials: "JO",
+                  label: "You",
+                  ring: "#2a78d6",
+                  accuracy: myCoords.accuracy,
+                },
+              ]
+            : [],
+        ),
+    [filtered, selectedId, myCoords],
   );
 
   const toggleCat = (k: CategoryKey) =>
@@ -196,6 +220,16 @@ export default function MapView({
                 Sample of {INCIDENT_STATS.pinned.toLocaleString()} located
                 messages
               </p>
+              {me && (
+                <p
+                  className={`hidden text-xs md:block ${me.coords ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"}`}
+                  title={me.help ?? undefined}
+                >
+                  {me.coords
+                    ? `● You: ±${Math.round(me.coords.accuracy)} m`
+                    : "● Your location: off"}
+                </p>
+              )}
               <button
                 type="button"
                 onClick={() => setFitKey((k) => k + 1)}
@@ -241,6 +275,7 @@ export default function MapView({
                 onClose={() => onSelect(null)}
                 onAssign={onAssign}
                 now={now}
+                me={me?.coords ?? null}
               />
             ) : (
               <>
@@ -315,12 +350,18 @@ function Detail({
   onClose,
   onAssign,
   now,
+  me,
 }: {
   report: Report;
   onClose: () => void;
   onAssign: (id: string, unit: string | null) => void;
   now: number;
+  me: Coords | null;
 }) {
+  const away =
+    me && r.latitude != null && r.longitude != null
+      ? distanceMetres(me, { lat: r.latitude, lng: r.longitude!, accuracy: 0 })
+      : null;
   return (
     <div className="flex flex-1 flex-col overflow-y-auto">
       <div className="flex items-start justify-between gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -358,14 +399,30 @@ function Detail({
           )}
           <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
             {when(r, now)}
+            {away != null &&
+              ` · ${away < 1000 ? `${Math.round(away)} m` : `${(away / 1000).toFixed(1)} km`} from you`}
           </p>
         </div>
 
         <div className="rounded-xl bg-zinc-50 p-3 dark:bg-zinc-800/60">
           <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Transcript
+            {r.language && r.language !== "en" && (
+              <span className="ml-2 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold tracking-normal text-sky-900 normal-case dark:bg-sky-950 dark:text-sky-200">
+                🌐 Spoken in {LANGS[r.language].english} (
+                {LANGS[r.language].native})
+              </span>
+            )}
           </p>
           <p className="mt-1 text-sm leading-relaxed">“{r.transcript}”</p>
+          {r.transcriptEn && (
+            <div className="mt-3 border-t border-zinc-200 pt-2 dark:border-zinc-700">
+              <p className="text-xs font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+                English translation
+              </p>
+              <p className="mt-1 text-sm leading-relaxed">“{r.transcriptEn}”</p>
+            </div>
+          )}
           {r.audioUrl ? (
             <audio controls src={r.audioUrl} className="mt-3 h-10 w-full" />
           ) : r.sizeKb ? (

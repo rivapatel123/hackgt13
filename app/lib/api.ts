@@ -1,6 +1,7 @@
 // Client helpers for /api/reports — shared by the civilian and responder dashboards.
 import {
   isHazardKey,
+  isLangKey,
   normalizeCategory,
   normalizeUrgency,
   type Report,
@@ -33,6 +34,8 @@ export function fromApi(row: Record<string, unknown>): Report {
     assignedTo: (row.assigned_to as string | null) ?? null,
     accuracy: typeof row.accuracy_m === "number" ? row.accuracy_m : null,
     gpsAddress: (row.gps_address as string | null) ?? null,
+    language: isLangKey(row.language) ? row.language : null,
+    transcriptEn: (row.transcript_en as string | null) ?? null,
     classifiedOnDevice: row.classified_by !== "grok",
     live: true,
   };
