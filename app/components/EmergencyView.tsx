@@ -1,0 +1,805 @@
+"use client";
+
+import { useCallback, useState } from "react";
+import {
+  CATEGORIES,
+  HAZARDS,
+  INCIDENT_STATS,
+  classifyLocally,
+  normalizeCategory,
+  normalizeUrgency,
+  type HazardKey,
+  type Report,
+} from "@/app/lib/data";
+import { useRecorder, type Recording } from "@/app/lib/useRecorder";
+import type { AppSettings } from "@/app/components/SettingsView";
+import {
+  AlertIcon,
+  CheckIcon,
+  ClockIcon,
+  HeartPulseIcon,
+  MicIcon,
+  PinIcon,
+  RefreshIcon,
+  SatelliteIcon,
+  ShieldIcon,
+  StopIcon,
+  UsersIcon,
+  WaveIcon,
+} from "@/app/components/icons";
+import { CategoryBadge, UrgencyBadge } from "@/app/components/Badges";
+
+type Stage = "idle" | "sending" | "done";
+type StepState = "done" | "active" | "waiting" | "failed";
+
+type Submission = {
+  recording: Recording;
+  report: Report | null;
+  stage: Stage;
+  error: string | null;
+};
+
+const PROMPTS = [
+  {
+    key: "who",
+    label: "Who you are",
+    hint: "Your name and how many people are with you",
+    example: "“This is Maria, there are 3 of us…”",
+    test: /\b(my name|this is|i'?m [a-z]+|i am|name'?s|there (are|is) \w+ of us|with my)\b/i,
+  },
+  {
+    key: "where",
+    label: "Where you are",
+    hint: "Street address, landmark, or floor",
+    example: "“…at 412 Bayshore Blvd, second floor…”",
+    test: /\b(\d{2,}|street|st\b|avenue|ave\b|road|rd\b|blvd|boulevard|drive|near|floor|apartment|apt|building|highway|hwy|corner|behind|next to)\b/i,
+  },
+  {
+    key: "what",
+    label: "What you need",
+    hint: "Medical help, water, rescue, shelter — or that you're safe",
+    example: "“…my husband is hurt and we need a boat.”",
+    test: /\b(need|help|hurt|injur|bleed|water|food|trapped|stuck|shelter|missing|medic|insulin|oxygen|rescue|boat|safe|okay)\b/i,
+  },
+] as const;
+
+export default function EmergencyView({
+  settings,
+  hazard,
+  onHazardChange,
+  myReports,
+  onReport,
+  onOpenMap,
+}: {
+  settings: AppSettings;
+  hazard: HazardKey | null;
+  onHazardChange: (h: HazardKey | null) => void;
+  myReports: Report[];
+  onReport: (r: Report, replaceId?: string) => void;
+  onOpenMap: (id: string) => void;
+}) {
+  const [submission, setSubmission] = useState<Submission | null>(null);
+
+  const send = useCallback(
+    async (rec: Recording, replaceId?: string) => {
+      setSubmission({
+        recording: rec,
+        report: null,
+        stage: "sending",
+        error: null,
+      });
+      const ext = rec.mimeType.includes("mp4")
+        ? "m4a"
+        : rec.mimeType.includes("ogg")
+          ? "ogg"
+          : "webm";
+      const fd = new FormData();
+      fd.append(
+        "audio",
+        new File([rec.blob], `sos-${Date.now()}.${ext}`, {
+          type: rec.mimeType,
+        }),
+      );
+      if (rec.coords) {
+        fd.append("lat", String(rec.coords.lat));
+        fd.append("lng", String(rec.coords.lng));
+      }
+      if (hazard) fd.append("hazard", hazard);
+
+      const base = {
+        audioUrl: rec.url,
+        sizeKb: Math.round(rec.sizeKb * 10) / 10,
+        durationSec: Math.round(rec.durationSec),
+        hazard,
+        live: true,
+        assignedTo: null,
+      };
+
+      let report: Report;
+      let error: string | null = null;
+      try {
+        const res = await fetch("/api/reports", {
+          method: "POST",
+          body: fd,
+          signal: AbortSignal.timeout(25_000),
+        });
+        if (!res.ok) throw new Error(`Server responded ${res.status}`);
+        const data = await res.json();
+        report = {
+          ...data,
+          ...base,
+          transcript: data.transcript || rec.transcript,
+          category: normalizeCategory(data.category),
+          urgency: normalizeUrgency(data.urgency),
+          created_at: data.created_at
+            ? new Date(
+                `${String(data.created_at).replace(" ", "T")}Z`,
+              ).toISOString()
+            : new Date().toISOString(),
+        };
+      } catch (e) {
+        // Keep the person's message even if the uplink or AI is unavailable.
+        const guess = classifyLocally(rec.transcript);
+        error = e instanceof Error ? e.message : "Upload failed";
+        report = {
+          ...base,
+          id: `local-${Date.now()}`,
+          transcript:
+            rec.transcript ||
+            "(Audio saved — transcript will be generated when the satellite uplink reconnects.)",
+          category: guess.category,
+          urgency: guess.urgency,
+          description: rec.transcript
+            ? rec.transcript.slice(0, 120)
+            : "Voice message queued",
+          raw_location_text: rec.coords
+            ? `GPS ${rec.coords.lat.toFixed(4)}, ${rec.coords.lng.toFixed(4)}`
+            : null,
+          latitude: rec.coords?.lat ?? null,
+          longitude: rec.coords?.lng ?? null,
+          created_at: new Date().toISOString(),
+          classifiedOnDevice: true,
+        };
+      }
+      onReport(report, replaceId);
+      setSubmission({ recording: rec, report, stage: "done", error });
+    },
+    [hazard, onReport],
+  );
+
+  const recorder = useRecorder({
+    bitrate: settings.bitrate,
+    maxSeconds: 45,
+    autoStopOnSilence: settings.autoStopOnSilence,
+    shareLocation: settings.shareLocation,
+    onComplete: send,
+  });
+
+  const recording = recorder.status === "recording";
+  const requesting = recorder.status === "requesting";
+  const heard = PROMPTS.map((p) => p.test.test(recorder.transcript));
+  const timeIndex = recorder.elapsed < 5 ? 0 : recorder.elapsed < 11 ? 1 : 2;
+  // With live captions, highlight the first thing not yet said; otherwise pace by time.
+  const activePrompt = !recording
+    ? -1
+    : recorder.liveCaptions
+      ? heard.findIndex((h) => !h)
+      : timeIndex;
+
+  const handlePress = () => {
+    if (recording) recorder.stop();
+    else if (!requesting) {
+      setSubmission(null);
+      recorder.start();
+    }
+  };
+
+  const secs = Math.floor(recorder.elapsed);
+  const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-5">
+        {/* ---- Big red button ---- */}
+        <section
+          aria-labelledby="sos-title"
+          className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-8 xl:col-span-3 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 id="sos-title" className="text-lg font-semibold">
+                Call for help
+              </h2>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                Tap once and talk. It sends{" "}
+                <strong className="font-semibold text-zinc-900 dark:text-zinc-100">
+                  automatically
+                </strong>{" "}
+                when you stop.
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-800 ring-1 ring-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:ring-emerald-900">
+              <SatelliteIcon width={14} height={14} /> Satellite linked ·{" "}
+              {Math.round(settings.bitrate / 1000)} kbps
+            </span>
+          </div>
+
+          {/* Hazard: one tap, optional */}
+          <fieldset className="mt-5">
+            <legend className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              What&apos;s happening?{" "}
+              <span className="normal-case tracking-normal">
+                (optional · one tap)
+              </span>
+            </legend>
+            <div className="flex flex-wrap gap-2">
+              {HAZARDS.map((h) => {
+                const on = hazard === h.key;
+                return (
+                  <button
+                    key={h.key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => onHazardChange(on ? null : h.key)}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 ${
+                      on
+                        ? "border-red-600 bg-red-600 text-white shadow-sm"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    }`}
+                  >
+                    <span aria-hidden="true">{h.emoji}</span>
+                    {h.label}
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+
+          <div className="mt-8 flex flex-col items-center">
+            <div className="relative grid place-items-center">
+              {/* Voice-reactive halo */}
+              {recording && (
+                <span
+                  aria-hidden="true"
+                  className="absolute inset-0 rounded-full bg-red-500/25 transition-transform duration-75"
+                  style={{
+                    transform: `scale(${1.04 + recorder.level * 0.35})`,
+                  }}
+                />
+              )}
+              {!recording && !requesting && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-full bg-red-500/20 motion-safe:animate-ping [animation-duration:2.2s]"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="absolute -inset-4 rounded-full border-2 border-red-500/20"
+                  />
+                </>
+              )}
+              <button
+                type="button"
+                onClick={handlePress}
+                aria-label={
+                  recording
+                    ? "Stop and send your message now"
+                    : "Start recording an emergency voice message"
+                }
+                className={`relative grid size-64 place-items-center rounded-full text-white shadow-[0_20px_60px_-15px_rgba(220,38,38,0.7)] transition active:scale-[0.97] focus-visible:outline-4 focus-visible:outline-offset-8 focus-visible:outline-red-600 sm:size-72 lg:size-80 ${
+                  recording
+                    ? "bg-gradient-to-b from-red-600 to-red-800"
+                    : "bg-gradient-to-b from-red-500 to-red-700 hover:from-red-500 hover:to-red-600"
+                }`}
+              >
+                <span className="flex flex-col items-center gap-2 px-6 text-center">
+                  {recording ? (
+                    <>
+                      <StopIcon width={44} height={44} />
+                      <span className="font-mono text-4xl font-semibold tabular-nums">
+                        {clock}
+                      </span>
+                      <span className="text-sm font-medium text-red-50">
+                        {recorder.speaking
+                          ? "Listening…"
+                          : "Keep talking, or tap to send"}
+                      </span>
+                    </>
+                  ) : requesting ? (
+                    <>
+                      <MicIcon
+                        width={48}
+                        height={48}
+                        className="motion-safe:animate-pulse"
+                      />
+                      <span className="text-lg font-semibold">
+                        Allow microphone…
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-5xl font-black tracking-tight sm:text-6xl">
+                        SOS
+                      </span>
+                      <span className="flex items-center gap-1.5 text-base font-semibold">
+                        <MicIcon width={20} height={20} /> Tap &amp; speak
+                      </span>
+                      <span className="text-xs font-medium text-red-100">
+                        Sends automatically
+                      </span>
+                    </>
+                  )}
+                </span>
+              </button>
+            </div>
+
+            {/* Live waveform */}
+            <div
+              className="mt-8 flex h-16 w-full max-w-md items-center justify-center gap-[3px]"
+              role="img"
+              aria-label={
+                recording
+                  ? recorder.speaking
+                    ? "Microphone is picking up your voice"
+                    : "Microphone is on, waiting for your voice"
+                  : "Microphone off"
+              }
+            >
+              {recorder.bars.map((b, i) => (
+                <span
+                  key={i}
+                  className={`w-1.5 rounded-full transition-[height] duration-75 ${recording ? (recorder.speaking ? "bg-red-600 dark:bg-red-500" : "bg-red-300 dark:bg-red-800") : "bg-zinc-200 dark:bg-zinc-700"}`}
+                  style={{ height: `${Math.max(6, b * 64)}px` }}
+                />
+              ))}
+            </div>
+
+            {/* Live captions */}
+            <div
+              aria-live="polite"
+              className="mt-3 min-h-[3.5rem] w-full max-w-xl text-center"
+            >
+              {recording ? (
+                recorder.transcript ? (
+                  <p className="text-lg leading-snug text-zinc-800 dark:text-zinc-100">
+                    “{recorder.transcript}”
+                  </p>
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    {recorder.liveCaptions
+                      ? recorder.speaking
+                        ? "Hearing you…"
+                        : "Start talking — your words will appear here."
+                      : "Recording your voice. Words appear after it's sent (live captions need Chrome or Edge)."}
+                  </p>
+                )
+              ) : recorder.error ? (
+                <p
+                  role="alert"
+                  className="rounded-lg bg-red-50 px-4 py-3 text-sm font-medium text-red-800 dark:bg-red-950/60 dark:text-red-200"
+                >
+                  {recorder.error}
+                </p>
+              ) : (
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                  Your message is compressed to about{" "}
+                  <strong className="text-zinc-800 dark:text-zinc-200">
+                    4 KB
+                  </strong>{" "}
+                  so it gets through even on a weak satellite link.
+                </p>
+              )}
+            </div>
+
+            {!recording && (
+              <button
+                type="button"
+                onClick={() =>
+                  onReport({
+                    id: `safe-${Date.now()}`,
+                    transcript: "One-tap check-in: I'm safe.",
+                    category: "safe",
+                    urgency: "low",
+                    description: "Marked safe via one-tap check-in",
+                    raw_location_text: recorder.coords
+                      ? `GPS ${recorder.coords.lat.toFixed(4)}, ${recorder.coords.lng.toFixed(4)}`
+                      : null,
+                    latitude: recorder.coords?.lat ?? null,
+                    longitude: recorder.coords?.lng ?? null,
+                    created_at: new Date().toISOString(),
+                    hazard,
+                    sizeKb: 0.2,
+                    live: true,
+                    assignedTo: null,
+                  })
+                }
+                className="mt-2 inline-flex items-center gap-2 rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+              >
+                <ShieldIcon width={16} height={16} /> I&apos;m safe — tell my
+                family
+              </button>
+            )}
+          </div>
+        </section>
+
+        {/* ---- Right column: what to say + delivery status ---- */}
+        <div className="flex flex-col gap-6 xl:col-span-2">
+          <section
+            aria-labelledby="say-title"
+            className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+          >
+            <h2 id="say-title" className="text-lg font-semibold">
+              Say these 3 things
+            </h2>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
+              Short is fine. We&apos;ll sort the rest.
+            </p>
+            <ol className="mt-4 space-y-3">
+              {PROMPTS.map((p, i) => {
+                const active = activePrompt === i;
+                const done = recording && heard[i];
+                return (
+                  <li
+                    key={p.key}
+                    className={`flex gap-4 rounded-xl border p-4 transition ${
+                      active
+                        ? "border-red-500 bg-red-50 ring-2 ring-red-500/30 dark:border-red-500 dark:bg-red-950/40"
+                        : done
+                          ? "border-emerald-300 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/30"
+                          : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/40"
+                    }`}
+                  >
+                    <span
+                      className={`grid size-10 shrink-0 place-items-center rounded-full text-lg font-black ${
+                        done
+                          ? "bg-emerald-600 text-white"
+                          : active
+                            ? "bg-red-600 text-white"
+                            : "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                      }`}
+                    >
+                      {done ? <CheckIcon width={20} height={20} /> : i + 1}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-xl font-extrabold uppercase tracking-tight text-zinc-950 dark:text-white">
+                        {p.label}
+                      </p>
+                      <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        {p.hint}
+                      </p>
+                      <p className="mt-1 text-sm italic text-zinc-500 dark:text-zinc-400">
+                        {p.example}
+                      </p>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+
+          <DeliveryCard
+            submission={submission}
+            coords={recorder.coords}
+            onOpenMap={onOpenMap}
+            onRetry={() =>
+              submission && send(submission.recording, submission.report?.id)
+            }
+          />
+        </div>
+      </div>
+
+      <StatsGrid />
+
+      {myReports.length > 0 && (
+        <section
+          aria-labelledby="mine-title"
+          className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <h2 id="mine-title" className="text-lg font-semibold">
+            Your messages
+          </h2>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Every recording is kept here so you and responders can replay it.
+          </p>
+          <ul className="mt-4 divide-y divide-zinc-200 dark:divide-zinc-800">
+            {myReports.map((r) => (
+              <li
+                key={r.id}
+                className="flex flex-col gap-3 py-4 md:flex-row md:items-center"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <CategoryBadge category={r.category} />
+                    <UrgencyBadge urgency={r.urgency} />
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {new Date(r.created_at).toLocaleTimeString([], {
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                      {r.sizeKb ? ` · ${r.sizeKb} KB` : ""}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-sm text-zinc-700 dark:text-zinc-300">
+                    {r.transcript}
+                  </p>
+                </div>
+                {r.audioUrl && (
+                  <audio
+                    controls
+                    src={r.audioUrl}
+                    className="h-10 w-full md:w-72"
+                  />
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function DeliveryCard({
+  submission,
+  coords,
+  onOpenMap,
+  onRetry,
+}: {
+  submission: Submission | null;
+  coords: Recording["coords"];
+  onOpenMap: (id: string) => void;
+  onRetry: () => void;
+}) {
+  if (!submission) {
+    return (
+      <section className="rounded-2xl border border-dashed border-zinc-300 bg-white/60 p-5 dark:border-zinc-700 dark:bg-zinc-900/60">
+        <h2 className="text-lg font-semibold">After you speak</h2>
+        <ul className="mt-3 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
+          <li className="flex items-center gap-2">
+            <WaveIcon width={16} height={16} /> Your voice is compressed to a
+            few kilobytes
+          </li>
+          <li className="flex items-center gap-2">
+            <SatelliteIcon width={16} height={16} /> Sent over satellite with
+            your GPS location
+          </li>
+          <li className="flex items-center gap-2">
+            <PinIcon width={16} height={16} /> Grok transcribes it and pins it
+            for responders
+          </li>
+        </ul>
+        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-500">
+          {coords
+            ? `Location locked ±${Math.round(coords.accuracy)} m`
+            : "Location is captured when you tap SOS."}
+        </p>
+      </section>
+    );
+  }
+
+  const { recording, report, stage, error } = submission;
+  const done = stage === "done";
+  const failed = done && !!error;
+  const steps: { label: string; detail: string; state: StepState }[] = [
+    {
+      label: "Recorded",
+      detail: `${recording.durationSec.toFixed(0)} sec`,
+      state: "done",
+    },
+    {
+      label: "Compressed",
+      detail: `${recording.sizeKb.toFixed(1)} KB · Opus`,
+      state: "done",
+    },
+    failed
+      ? {
+          label: "Couldn't reach server",
+          detail: "Saved on this phone",
+          state: "failed",
+        }
+      : {
+          label: "Sent via satellite",
+          detail: recording.coords
+            ? "with GPS location"
+            : "location from your words",
+          state: done ? "done" : "active",
+        },
+    failed
+      ? {
+          label: "Sorted on this device",
+          detail: report ? CATEGORIES[report.category].label : "…",
+          state: "done",
+        }
+      : {
+          label: "Transcribed & sorted by Grok",
+          detail: report ? CATEGORIES[report.category].label : "…",
+          state: done ? "done" : "waiting",
+        },
+    {
+      label: "Responders notified",
+      detail: failed ? "After it's sent" : "Pinned on dispatcher map",
+      state: done && !failed ? "done" : "waiting",
+    },
+  ];
+
+  return (
+    <section
+      aria-live="polite"
+      className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold">
+          {failed
+            ? "Saved — not sent yet"
+            : done
+              ? "Help request delivered"
+              : "Sending your message…"}
+        </h2>
+        {failed ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="inline-flex items-center gap-1 rounded-full bg-amber-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-amber-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600"
+          >
+            <RefreshIcon width={14} height={14} /> Send again
+          </button>
+        ) : (
+          done && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white">
+              <CheckIcon width={14} height={14} /> Sent
+            </span>
+          )
+        )}
+      </div>
+
+      <ol className="mt-4 space-y-2.5">
+        {steps.map((s, i) => {
+          return (
+            <li key={i} className="flex items-center gap-3 text-sm">
+              <span
+                className={`grid size-6 shrink-0 place-items-center rounded-full ${
+                  s.state === "done"
+                    ? "bg-emerald-600 text-white"
+                    : s.state === "failed"
+                      ? "bg-amber-500 text-white"
+                      : s.state === "active"
+                        ? "border-2 border-red-600 border-t-transparent motion-safe:animate-spin"
+                        : "border-2 border-zinc-300 dark:border-zinc-700"
+                }`}
+              >
+                {s.state === "done" && <CheckIcon width={14} height={14} />}
+                {s.state === "failed" && <AlertIcon width={13} height={13} />}
+              </span>
+              <span
+                className={`font-medium ${s.state === "done" || s.state === "failed" ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-500 dark:text-zinc-400"}`}
+              >
+                {s.label}
+              </span>
+              <span className="ml-auto text-right text-xs text-zinc-500 dark:text-zinc-400">
+                {s.detail}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="mt-4 rounded-xl bg-zinc-50 p-3 dark:bg-zinc-800/60">
+        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Your recording
+        </p>
+        <audio controls src={recording.url} className="h-10 w-full" />
+      </div>
+
+      {report && (
+        <div className="mt-4 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <CategoryBadge category={report.category} />
+            <UrgencyBadge urgency={report.urgency} />
+          </div>
+          <p className="text-sm text-zinc-700 dark:text-zinc-300">
+            “{report.transcript}”
+          </p>
+          {error && (
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              Uplink unavailable ({error}). Your recording is saved on this
+              phone — tap Send again when you have signal.
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => onOpenMap(report.id)}
+            className="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-red-700 hover:underline dark:text-red-400"
+          >
+            <PinIcon width={16} height={16} /> See it on the responder map
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StatsGrid() {
+  const s = INCIDENT_STATS;
+  const cards = [
+    {
+      label: "Voice messages received",
+      value: s.messagesReceived.toLocaleString(),
+      note: "+312 in the last hour",
+      icon: MicIcon,
+      tone: "text-red-600 bg-red-50 dark:bg-red-950/50 dark:text-red-400",
+    },
+    {
+      label: "Pinned on the map",
+      value: s.pinned.toLocaleString(),
+      note: `${Math.round((s.pinned / s.messagesReceived) * 100)}% auto-located`,
+      icon: PinIcon,
+      tone: "text-blue-600 bg-blue-50 dark:bg-blue-950/50 dark:text-blue-400",
+    },
+    {
+      label: "Average message size",
+      value: `${s.avgSizeKb} KB`,
+      note: "vs ~480 KB for a 1-min call",
+      icon: WaveIcon,
+      tone: "text-violet-600 bg-violet-50 dark:bg-violet-950/50 dark:text-violet-400",
+    },
+    {
+      label: "Median time to dispatch",
+      value: "6m 42s",
+      note: "↓ 58% vs phone hotline",
+      icon: ClockIcon,
+      tone: "text-amber-600 bg-amber-50 dark:bg-amber-950/50 dark:text-amber-400",
+    },
+    {
+      label: "People marked safe",
+      value: s.markedSafe.toLocaleString(),
+      note: `${s.rescuesCompleted} rescues completed`,
+      icon: HeartPulseIcon,
+      tone: "text-emerald-600 bg-emerald-50 dark:bg-emerald-950/50 dark:text-emerald-400",
+    },
+    {
+      label: "Responders in the field",
+      value: String(s.respondersActive),
+      note: "38 teams · 6 agencies",
+      icon: UsersIcon,
+      tone: "text-sky-600 bg-sky-50 dark:bg-sky-950/50 dark:text-sky-400",
+    },
+  ];
+  return (
+    <section aria-labelledby="stats-title">
+      <div className="mb-3 flex items-baseline justify-between">
+        <h2 id="stats-title" className="text-lg font-semibold">
+          Hurricane Delphine response · live
+        </h2>
+        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+          Updated 3:42 PM EDT
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+        {cards.map((c) => (
+          <div
+            key={c.label}
+            className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={`grid size-8 place-items-center rounded-lg ${c.tone}`}
+              >
+                <c.icon width={16} height={16} />
+              </span>
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                {c.label}
+              </p>
+            </div>
+            <p className="mt-3 text-3xl font-semibold tabular-nums tracking-tight">
+              {c.value}
+            </p>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              {c.note}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
