@@ -11,12 +11,18 @@ import {
 import {
   classifyLocally,
   detectHazard,
+  scoreUrgency,
   extractAddress,
   summarize,
   isHazardKey,
   normalizeCategory,
   normalizeUrgency,
 } from "@/app/lib/data";
+
+function num01(v: unknown) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
+}
 
 function str(v: FormDataEntryValue | null) {
   return typeof v === "string" && v.trim() ? v.trim() : null;
@@ -46,6 +52,11 @@ export async function POST(req: NextRequest) {
     : null;
   const forcedLang =
     formData.get("language_forced") === "1" ? clientLang : null;
+  // "caller" = they tapped a disaster button themselves; "voice" = auto-picked
+  // on the phone from live captions (with that guess's confidence).
+  const hazardSourceHint = str(formData.get("hazard_source"));
+  const hazardConfHint = Number(formData.get("hazard_confidence")) || null;
+  const captionConfidence = Number(formData.get("caption_confidence")) || null;
 
   if (!audio && !clientTranscript) {
     return NextResponse.json(
@@ -62,6 +73,12 @@ export async function POST(req: NextRequest) {
   let transcript = clientTranscript ?? "";
   let english = transcript;
   let language: SpeechLang | null = clientLang ?? null;
+  let languageConfidence: number | null = null;
+  // Without Whisper, fall back to the phone recognizer's own confidence.
+  let transcriptionConfidence: number | null = clientTranscript
+    ? captionConfidence
+    : null;
+  let words: { w: string; p: number }[] | null = null;
   if (buffer) {
     try {
       const r = await transcribeAndTranslate(buffer, forcedLang);
@@ -69,6 +86,9 @@ export async function POST(req: NextRequest) {
         transcript = r.text;
         english = r.english || r.text;
         language = r.language;
+        languageConfidence = forcedLang ? null : r.languageConfidence;
+        transcriptionConfidence = r.transcriptionConfidence;
+        words = r.words;
       }
     } catch (e) {
       console.warn("[reports] Whisper unavailable:", (e as Error).message);
@@ -97,6 +117,8 @@ export async function POST(req: NextRequest) {
   let parsed = {
     category: local.category as string,
     urgency: local.urgency as string,
+    urgencyConfidence: null as number | null,
+    hazardConfidence: null as number | null,
     description: english
       ? summarize(english)
       : "Voice message (no transcript yet)",
@@ -112,6 +134,9 @@ export async function POST(req: NextRequest) {
         description: g.description ?? parsed.description,
         location_text: g.location_text ?? parsed.location_text,
         hazard: isHazardKey(g.hazard) ? g.hazard : parsed.hazard,
+        // Grok's own estimates (0–1), when it provides them.
+        urgencyConfidence: num01(g.urgency_confidence),
+        hazardConfidence: num01(g.hazard_confidence),
       };
       classifiedBy = "grok";
     } catch (e) {
@@ -123,9 +148,45 @@ export async function POST(req: NextRequest) {
   }
 
   const category = normalizeCategory(categoryHint ?? parsed.category);
-  const urgency =
-    category === "safe" ? "low" : normalizeUrgency(parsed.urgency);
-  const hazard = isHazardKey(hazardHint) ? hazardHint : parsed.hazard;
+
+  // Urgency + how sure we are. A tapped "I'm safe" is the person's own answer.
+  let urgency: string;
+  let urgencyConfidence: number | null;
+  if (category === "safe" && categoryHint === "safe") {
+    urgency = "low";
+    urgencyConfidence = 1;
+  } else if (classifiedBy === "grok") {
+    urgency = normalizeUrgency(parsed.urgency);
+    urgencyConfidence = parsed.urgencyConfidence;
+  } else {
+    const u = scoreUrgency(both, category);
+    urgency = u.urgency;
+    urgencyConfidence = u.confidence;
+  }
+
+  // Disaster type + how sure we are, and who decided it.
+  let hazard = parsed.hazard;
+  let hazardConfidence: number | null = null;
+  let hazardSource: string | null = null;
+  if (isHazardKey(hazardHint) && hazardSourceHint === "caller") {
+    hazard = hazardHint;
+    hazardConfidence = 1;
+    hazardSource = "caller";
+  } else if (classifiedBy === "grok" && parsed.hazard) {
+    hazardConfidence = parsed.hazardConfidence;
+    hazardSource = "ai";
+  } else {
+    const det = detectHazard(both);
+    if (det) {
+      hazard = det.key;
+      hazardConfidence = det.confidence;
+      hazardSource = "ai";
+    } else if (isHazardKey(hazardHint)) {
+      hazard = hazardHint;
+      hazardConfidence = hazardConfHint;
+      hazardSource = "voice";
+    } else hazard = null;
+  }
 
   let lat = gpsLat ? parseFloat(gpsLat) : null;
   let lng = gpsLng ? parseFloat(gpsLng) : null;
@@ -150,8 +211,9 @@ export async function POST(req: NextRequest) {
   db.prepare(
     `INSERT INTO reports (id, transcript, category, urgency, description, raw_location_text, latitude, longitude,
        hazard, audio, audio_mime, size_kb, duration_sec, name, source, classified_by, accuracy_m, gps_address,
-       language, transcript_en)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       language, transcript_en, transcription_conf, language_conf, urgency_conf, hazard_conf,
+       hazard_source, transcript_words)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     transcript,
@@ -175,6 +237,12 @@ export async function POST(req: NextRequest) {
     gpsAddress,
     language,
     language && language !== "en" ? english : null,
+    transcriptionConfidence,
+    languageConfidence,
+    urgencyConfidence,
+    hazardConfidence,
+    hazardSource,
+    words ? JSON.stringify(words) : null,
   );
 
   const report = db

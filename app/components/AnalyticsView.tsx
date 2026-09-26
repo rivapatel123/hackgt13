@@ -140,7 +140,7 @@ function BandwidthCompare() {
       note: "~32 kbps AAC",
     },
     {
-      label: "CallForHelp voice message",
+      label: "ResQ voice message",
       kb: 12,
       note: "~8 s of speech · 12 kbps Opus, mono",
       ours: true,

@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CallForHelp — Emergency voice relay",
+  title: "ResQ — Emergency voice relay",
   description:
     "Tiny compressed voice messages over satellite, transcribed and sorted by Grok into a live map for relief teams.",
 };

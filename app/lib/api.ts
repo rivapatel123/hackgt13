@@ -7,6 +7,23 @@ import {
   type Report,
 } from "@/app/lib/data";
 
+// SQLite datetime('now') is UTC without a zone marker.
+function sqlTime(v: string) {
+  return v.includes("T")
+    ? v
+    : new Date(`${v.replace(" ", "T")}Z`).toISOString();
+}
+const num = (v: unknown) => (typeof v === "number" ? v : null);
+function parseWords(v: unknown): Report["words"] {
+  if (typeof v !== "string") return null;
+  try {
+    const w = JSON.parse(v);
+    return Array.isArray(w) ? w : null;
+  } catch {
+    return null;
+  }
+}
+
 export function fromApi(row: Record<string, unknown>): Report {
   const id = String(row.id);
   const created = String(row.created_at ?? "");
@@ -19,10 +36,7 @@ export function fromApi(row: Record<string, unknown>): Report {
     raw_location_text: (row.raw_location_text as string | null) ?? null,
     latitude: typeof row.latitude === "number" ? row.latitude : null,
     longitude: typeof row.longitude === "number" ? row.longitude : null,
-    // SQLite datetime('now') is UTC without a zone marker.
-    created_at: created.includes("T")
-      ? created
-      : new Date(`${created.replace(" ", "T")}Z`).toISOString(),
+    created_at: sqlTime(created),
     hazard: isHazardKey(row.hazard) ? row.hazard : null,
     name: (row.name as string) ?? undefined,
     audioUrl: row.has_audio ? `/api/reports/${id}/audio` : undefined,
@@ -36,6 +50,13 @@ export function fromApi(row: Record<string, unknown>): Report {
     gpsAddress: (row.gps_address as string | null) ?? null,
     language: isLangKey(row.language) ? row.language : null,
     transcriptEn: (row.transcript_en as string | null) ?? null,
+    assignedAt: row.assigned_at ? sqlTime(String(row.assigned_at)) : null,
+    transcriptionConfidence: num(row.transcription_conf),
+    languageConfidence: num(row.language_conf),
+    urgencyConfidence: num(row.urgency_conf),
+    hazardConfidence: num(row.hazard_conf),
+    hazardSource: (row.hazard_source as Report["hazardSource"]) ?? null,
+    words: parseWords(row.transcript_words),
     classifiedOnDevice: row.classified_by !== "grok",
     live: true,
   };

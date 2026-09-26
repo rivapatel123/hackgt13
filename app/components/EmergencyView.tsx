@@ -13,6 +13,10 @@ import {
   classifyLocally,
   detectHazard,
   deviceLanguage,
+  fmtClock,
+  fmtDate,
+  fmtDuration,
+  responseTime,
   isLangKey,
   type HazardKey,
   type LangKey,
@@ -152,7 +156,16 @@ export default function EmergencyView({
           fd.append("accuracy", String(Math.round(coords.accuracy)));
       }
       const hazard = hazardFor(rec.transcript);
-      if (hazard) fd.append("hazard", hazard);
+      if (hazard) {
+        fd.append("hazard", hazard);
+        // Tell responders whether the caller chose it or we guessed it.
+        const picked = manualHazard && manualHazard !== "none";
+        fd.append("hazard_source", picked ? "caller" : "voice");
+        const guess = picked ? null : detectHazard(rec.transcript);
+        if (guess) fd.append("hazard_confidence", String(guess.confidence));
+      }
+      if (rec.captionConfidence)
+        fd.append("caption_confidence", String(rec.captionConfidence));
       if (rec.transcript) fd.append("transcript", rec.transcript);
       fd.append("duration", String(Math.round(rec.durationSec)));
       fd.append("name", "Maria Delgado");
@@ -212,6 +225,7 @@ export default function EmergencyView({
     },
     [
       hazardFor,
+      manualHazard,
       onReport,
       location,
       settings.shareLocation,
@@ -534,9 +548,6 @@ export default function EmergencyView({
                     <strong className="text-zinc-900 dark:text-white">
                       {LANGS[lang.key].native}
                     </strong>
-                    {lang.confidence
-                      ? ` · ${Math.round(lang.confidence * 100)}% sure`
-                      : ""}
                   </>
                 ) : lang.source === "manual" ? (
                   <>
@@ -719,10 +730,10 @@ export default function EmergencyView({
                     <CategoryBadge category={r.category} />
                     <UrgencyBadge urgency={r.urgency} />
                     <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {new Date(r.created_at).toLocaleTimeString([], {
-                        hour: "numeric",
-                        minute: "2-digit",
-                      })}
+                      Sent {fmtClock(r.created_at)}
+                      {r.assignedAt
+                        ? ` · ${r.assignedTo} responded ${fmtClock(r.assignedAt)} (${fmtDuration(responseTime(r)!)} later)`
+                        : " · waiting for a responder"}
                       {r.sizeKb ? ` · ${r.sizeKb} KB` : ""}
                     </span>
                   </div>
@@ -826,7 +837,9 @@ function DeliveryCard({
           report?.assignedTo
             ? {
                 label: `${report.assignedTo} is on the way`,
-                detail: "Stay where you are",
+                detail: report.assignedAt
+                  ? `Responded ${fmtClock(report.assignedAt)} · ${fmtDuration(responseTime(report)!)} after you asked`
+                  : "Stay where you are",
                 state: "done" as StepState,
               }
             : {
@@ -867,6 +880,18 @@ function DeliveryCard({
           )
         )}
       </div>
+      {report && !failed && (
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Received by responders at{" "}
+          <time
+            dateTime={report.created_at}
+            className="font-medium text-zinc-700 dark:text-zinc-300"
+          >
+            {fmtClock(report.created_at, true)}
+          </time>{" "}
+          on {fmtDate(report.created_at)}
+        </p>
+      )}
 
       <ol className="mt-4 space-y-2.5">
         {steps.map((s, i) => {

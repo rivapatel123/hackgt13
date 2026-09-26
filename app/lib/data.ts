@@ -1,5 +1,5 @@
 // Shared frontend types, category metadata, and realistic placeholder data
-// for the CallForHelp dashboard. Placeholder reports are generated with a
+// for the ResQ dashboard. Placeholder reports are generated with a
 // seeded RNG so server and client renders match.
 
 export type CategoryKey =
@@ -27,6 +27,14 @@ export type Report = {
   gpsAddress?: string | null; // street address for the GPS fix
   language?: LangKey | null; // spoken language (auto-detected)
   transcriptEn?: string | null; // English translation when not spoken in English
+  assignedAt?: string | null; // when a responder was assigned (responded)
+  // AI confidence, 0–1 (null = not measured)
+  transcriptionConfidence?: number | null;
+  languageConfidence?: number | null;
+  urgencyConfidence?: number | null;
+  hazardConfidence?: number | null;
+  hazardSource?: "ai" | "voice" | "caller" | "alert" | null;
+  words?: { w: string; p: number }[] | null; // per-word transcription confidence
   created_at: string;
   hazard?: HazardKey | null;
   name?: string;
@@ -253,11 +261,24 @@ const HAZARD_CUES_INTL: Record<HazardKey, [RegExp, number][]> = {
   ],
 };
 
-export function detectHazard(
-  text: string,
-): { key: HazardKey; score: number; cues: string[] } | null {
+// Evidence mass reserved for "none of these / something else", so a single
+// weak cue can't produce a confident answer.
+const HAZARD_PRIOR = 3;
+
+/**
+ * Guess the disaster from the caller's words.
+ * confidence = winning evidence ÷ (all evidence + prior): high when one
+ * disaster clearly dominates, low when cues are weak or point several ways.
+ */
+export function detectHazard(text: string): {
+  key: HazardKey;
+  score: number;
+  confidence: number;
+  cues: string[];
+} | null {
   const t = ` ${text.toLowerCase()} `;
   let best: { key: HazardKey; score: number; cues: string[] } | null = null;
+  let total = 0;
   for (const key of Object.keys(HAZARD_CUES) as HazardKey[]) {
     let score = 0;
     const cues: string[] = [];
@@ -274,9 +295,12 @@ export function detectHazard(
         if (!cues.includes(m[0])) cues.push(m[0]);
       }
     }
+    total += score;
     if (score > (best?.score ?? 0)) best = { key, score, cues };
   }
-  return best && best.score >= 3 ? best : null;
+  return best && best.score >= 3
+    ? { ...best, confidence: best.score / (total + HAZARD_PRIOR) }
+    : null;
 }
 
 export function isHazardKey(v: unknown): v is HazardKey {
@@ -494,6 +518,7 @@ export const DEMO_NOW = Date.parse("2026-09-25T15:42:00-04:00");
 
 function buildSeedReports(): Report[] {
   const rand = mulberry32(1337);
+  const extra = mulberry32(2024);
   const pick = <T>(arr: readonly T[]) => arr[Math.floor(rand() * arr.length)];
   const total = WEIGHTS.reduce((s, [, w]) => s + w, 0);
   const out: Report[] = [];
@@ -512,22 +537,46 @@ function buildSeedReports(): Report[] {
     const name = pick(NAMES);
     const addr = `${100 + Math.floor(rand() * 9800)} ${pick(STREETS)}, ${hood.name}`;
     const minutesAgo = Math.floor(rand() * rand() * 900) + 1;
+    const transcript = tpl.t.replace("{name}", name).replace("{addr}", addr);
+    // Extra randomness from a second generator so the layout above is unchanged.
+    const respondMin = 2 + Math.round(extra() * 22);
+    const transcriptionConfidence = 0.7 + extra() * 0.27;
+    const u = scoreUrgency(transcript, cat);
+    const hz = detectHazard(transcript);
+    const assigned = rand() > 0.55;
     out.push({
       id: `seed-${i}`,
-      transcript: tpl.t.replace("{name}", name).replace("{addr}", addr),
+      transcript,
       category: cat,
-      urgency: tpl.u,
+      // Filed the same way live messages are: by the urgency model.
+      urgency: u.urgency,
       description: tpl.d,
       raw_location_text: addr,
       latitude: hood.lat + (rand() - 0.5) * 0.06,
       longitude: hood.lng + (rand() - 0.5) * 0.07,
       created_at: new Date(DEMO_NOW - minutesAgo * 60_000).toISOString(),
-      hazard: "hurricane",
+      // Disaster: from the words if they say it, else the area-wide alert.
+      hazard: hz?.key ?? "hurricane",
+      hazardConfidence: hz?.confidence ?? null,
+      hazardSource: hz ? "ai" : "alert",
+      transcriptionConfidence,
+      urgencyConfidence: u.confidence,
       name,
       people: 1 + Math.floor(rand() * 5),
       sizeKb: Math.round((7 + rand() * 11) * 10) / 10,
       durationSec: 9 + Math.floor(rand() * 20),
-      assignedTo: rand() > 0.55 ? pick(RESPONDER_UNITS) : null,
+      ...(() => {
+        const unit = assigned ? pick(RESPONDER_UNITS) : null;
+        // Only "responded" if the response time has already passed.
+        return unit && respondMin < minutesAgo
+          ? {
+              assignedTo: unit,
+              assignedAt: new Date(
+                DEMO_NOW - (minutesAgo - respondMin) * 60_000,
+              ).toISOString(),
+            }
+          : { assignedTo: null, assignedAt: null };
+      })(),
     });
   }
   return out.sort((a, b) => b.created_at.localeCompare(a.created_at));
@@ -541,8 +590,6 @@ export const RESPONDER_UNITS = [
   "Red Cross ERV 4",
   "National Guard Hi-Water 2",
 ];
-
-export const SEED_REPORTS = buildSeedReports();
 
 // Headline numbers for the whole incident (the map shows a sample of them).
 export const INCIDENT_STATS = {
@@ -608,7 +655,7 @@ export const NOTIFICATIONS = [
 ];
 
 export function timeAgo(iso: string, now = DEMO_NOW) {
-  const mins = Math.max(0, Math.round((now - Date.parse(iso)) / 60_000));
+  const mins = Math.max(0, Math.floor((now - Date.parse(iso)) / 60_000));
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
   const h = Math.floor(mins / 60);
@@ -617,9 +664,111 @@ export function timeAgo(iso: string, now = DEMO_NOW) {
 
 // Keyword fallback used only when the backend is unreachable (e.g. offline
 // demo). The real classification comes from Grok via /api/reports.
+// Evidence for each urgency level (en / es / fr / zh), with weights.
+const URGENCY_CUES: Record<Urgency, [RegExp, number][]> = {
+  high: [
+    [/\b(trapped|stuck)\b|atrapad|coincé|piégé|被困|困住/, 2],
+    [/\bbleed\w*|sangr|saign|流血/, 2],
+    [
+      /can'?t breathe|not breathing|no (puede|puedo) respirar|ne (peut|peux) (pas )?respirer|不能呼吸|喘不过气/,
+      3,
+    ],
+    [/\bunconscious|inconscien|昏迷/, 3],
+    [/\b(dying|killed|dead)\b|muriendo|muerto|mourant|死/, 2],
+    [/\b(rising|coming in)\b|subiendo|monte|上涨|涨水/, 1.5],
+    [/\b(fire|smoke|flames)\b|fuego|humo|\bfeu\b|fumée|着火|火灾|烟/, 1.5],
+    [
+      /\b(hurry|right now|immediately|urgent|emergency)\b|urgente|rápido|\bvite\b|紧急|救命/,
+      1,
+    ],
+    [
+      /\b(pregnan\w*|contractions|heart attack|chest pain|insulin|oxygen)\b|embarazada|contracciones|insulina|oxígeno|enceinte|insuline|oxygène|怀孕|胰岛素|氧气/,
+      1.5,
+    ],
+    [/\b(hurt|injur\w*|broken)\b|herid|blessé|受伤/, 1.5],
+    [
+      /\b(water inside|feet of water|water up to)\b|agua adentro|eau dans la maison|屋里进水/,
+      2,
+    ],
+    [
+      /\b(need to get out|get us out|can'?t get out|attic|kitchen counter|roof to escape)\b|no podemos salir|on ne peut pas sortir|出不去/,
+      2,
+    ],
+    [
+      /\b(dementia|alzheimer\w*|wheelchair|bedridden|newborn|infant)\b|demencia|démence|痴呆/,
+      1.5,
+    ],
+  ],
+  medium: [
+    [/\b(need|needs|out of|ran out|running out)\b|necesit|besoin|需要/, 1],
+    [
+      /\b(water|food|formula|supplies|medicine)\b|\bagua\b|comida|de l'eau|nourriture|食物|喝水/,
+      1,
+    ],
+    [
+      /\b(roof|shelter|place to stay|damage\w*|no power|power('?s)? out)\b|techo|refugio|\btoit\b|屋顶|避难|停电/,
+      1,
+    ],
+    [
+      /\b(missing|can'?t find|haven'?t heard)\b|desaparecid|disparu|失踪|找不到/,
+      1.5,
+    ],
+    [
+      /\b(stitches|stopped (most of )?the bleeding|minor|not serious|stable)\b|puntos|points de suture/,
+      2.5,
+    ],
+  ],
+  low: [
+    [
+      /\b(safe|okay|fine|all good|no injuries|nobody('?s| is)? hurt|no one('?s| is)? hurt|no damage|rode it out)\b|a salvo|estamos bien|estoy bien|en sécurité|ça va|nous allons bien|安全|没事/,
+      2.5,
+    ],
+    [/\b(just letting|let (my )?family know|checking in|checked in)\b/, 1.5],
+  ],
+};
+
+// How much the request type alone suggests each urgency level.
+const CATEGORY_URGENCY: Partial<
+  Record<CategoryKey, Partial<Record<Urgency, number>>>
+> = {
+  medical: { high: 1.5 },
+  flood: { high: 1.5 },
+  fire: { high: 1.5 },
+  missing_person: { high: 1.25, medium: 0.5 },
+  food_water: { medium: 1.5 },
+  shelter: { medium: 1.5 },
+  safe: { low: 2.5 },
+};
+
+/**
+ * Urgency with a probability for each level: evidence scores from cue words
+ * + request type, turned into probabilities with a softmax. With no evidence
+ * every level is 1/3, so the model is honestly unsure.
+ */
+export function scoreUrgency(text: string, category: CategoryKey) {
+  const t = text.toLowerCase();
+  const levels: Urgency[] = ["high", "medium", "low"];
+  const score = Object.fromEntries(
+    levels.map((u) => [
+      u,
+      URGENCY_CUES[u].reduce((s, [re, w]) => s + (re.test(t) ? w : 0), 0) +
+        (CATEGORY_URGENCY[category]?.[u] ?? 0),
+    ]),
+  ) as Record<Urgency, number>;
+  const T = 1.2; // temperature: >1 keeps the model from over-claiming
+  const exp = levels.map((u) => Math.exp(score[u] / T));
+  const sum = exp.reduce((a, b) => a + b, 0);
+  const probs = Object.fromEntries(
+    levels.map((u, i) => [u, exp[i] / sum]),
+  ) as Record<Urgency, number>;
+  const urgency = levels.reduce((a, b) => (probs[b] > probs[a] ? b : a));
+  return { urgency, confidence: probs[urgency], probs };
+}
+
 export function classifyLocally(text: string): {
   category: CategoryKey;
   urgency: Urgency;
+  urgencyConfidence: number;
 } {
   const t = text.toLowerCase();
   const has = (...w: string[]) => w.some((x) => t.includes(x));
@@ -790,32 +939,8 @@ export function classifyLocally(text: string): {
     )
   )
     category = "safe";
-  const urgency: Urgency =
-    category === "safe"
-      ? "low"
-      : has(
-            "now",
-            "please",
-            "hurry",
-            "dying",
-            "can't breathe",
-            "trapped",
-            "bleeding",
-            "rising",
-            "urgent",
-            "s'il vous plaît",
-            "por favor",
-            "rápido",
-            "救命",
-            "紧急",
-            "快",
-          ) ||
-          category === "medical" ||
-          category === "flood" ||
-          category === "fire"
-        ? "high"
-        : "medium";
-  return { category, urgency };
+  const u = scoreUrgency(text, category);
+  return { category, urgency: u.urgency, urgencyConfidence: u.confidence };
 }
 
 // Where the demo civilian (Maria Delgado) is sheltering in the scenario.
@@ -888,4 +1013,34 @@ export function deviceLanguage(): LangKey {
     if (isLangKey(k)) return k;
   }
   return "en";
+}
+
+// Built last: it uses the scoring functions and cue tables defined above.
+export const SEED_REPORTS = buildSeedReports();
+
+// ---- Time formatting for message / response timestamps ----
+export function fmtClock(iso: string, withSeconds = false) {
+  return new Date(iso).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    ...(withSeconds ? { second: "2-digit" } : {}),
+  });
+}
+
+export function fmtDate(iso: string) {
+  return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+/** "6m 12s", "1h 04m", "45s" */
+export function fmtDuration(ms: number) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** Time from the message arriving to a responder being assigned. */
+export function responseTime(r: { created_at: string; assignedAt?: string | null }) {
+  return r.assignedAt ? Date.parse(r.assignedAt) - Date.parse(r.created_at) : null;
 }

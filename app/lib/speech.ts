@@ -127,31 +127,156 @@ export async function detectLanguage(buf: Buffer) {
 }
 
 /** Detect (unless forced) → transcribe in that language → translate to English. */
+// Whisper hears 30 s at a time; longer messages are processed in pieces.
+const SAMPLE_RATE = 16_000;
+const CHUNK_SAMPLES = 28 * SAMPLE_RATE;
+const MIN_TAIL = 0.5 * SAMPLE_RATE;
+
 export async function transcribeAndTranslate(
   buf: Buffer,
   forced?: SpeechLang | null,
 ) {
   const w = await loadWhisper();
   const audio = await decodeAudio(buf);
-  const input_features = await features(w, audio);
+  const chunks: Float32Array[] = [];
+  for (let i = 0; i < audio.length; i += CHUNK_SAMPLES) {
+    const piece = audio.subarray(i, i + CHUNK_SAMPLES);
+    if (piece.length >= MIN_TAIL || chunks.length === 0) chunks.push(piece);
+  }
+  const feats = [];
+  for (const c of chunks) feats.push(await features(w, c));
+
   const detected = forced
     ? { language: forced, confidence: 1 }
-    : await scoreLanguages(w, input_features);
+    : await scoreLanguages(w, feats[0]);
   const language = detected.language;
 
-  const run = async (task: "transcribe" | "translate") => {
-    const ids = await w.model.generate({
+  const run = async (
+    input_features: unknown,
+    task: "transcribe" | "translate",
+  ) => {
+    const ids = (await w.model.generate({
       input_features,
       language,
       task,
       max_new_tokens: 220,
-    } as Parameters<typeof w.model.generate>[0]);
-    return w.tokenizer
+    } as Parameters<typeof w.model.generate>[0])) as unknown as {
+      data: BigInt64Array;
+    };
+    const text = w.tokenizer
       .batch_decode(ids as never, { skip_special_tokens: true })[0]
       .trim();
+    return { text, ids: Array.from(ids.data) };
   };
 
-  const text = await run("transcribe");
-  const english = language === "en" ? text : await run("translate");
-  return { language, confidence: detected.confidence, text, english };
+  const texts: string[] = [];
+  const englishParts: string[] = [];
+  const words: { w: string; p: number }[] = [];
+  let logSum = 0;
+  let count = 0;
+  for (const f of feats) {
+    const heard = await run(f, "transcribe");
+    if (!heard.text) continue;
+    texts.push(heard.text);
+    englishParts.push(
+      language === "en" ? heard.text : (await run(f, "translate")).text,
+    );
+    const scored = await scoreTranscript(w, f, heard.ids, language);
+    logSum += scored.logSum;
+    count += scored.count;
+    // Keep a space between pieces so word grouping stays readable.
+    if (words.length && scored.words.length && language !== "zh")
+      scored.words[0] = {
+        ...scored.words[0],
+        w: ` ${scored.words[0].w.trimStart()}`,
+      };
+    words.push(...scored.words);
+  }
+  const sep = language === "zh" ? "" : " ";
+  return {
+    language,
+    languageConfidence: detected.confidence,
+    text: texts.join(sep).trim(),
+    english: englishParts.join(" ").trim(),
+    transcriptionConfidence: count ? Math.exp(logSum / count) : null,
+    words,
+  };
+}
+
+/**
+ * How sure Whisper was of its own transcript: re-run the decoder over the
+ * final tokens (teacher forcing) and read the probability it gave each one.
+ * Overall confidence = geometric mean of token probabilities, i.e.
+ * exp(average log-probability) — the standard Whisper quality score.
+ * Each word's confidence is its least-certain token.
+ */
+async function scoreTranscript(
+  w: Loaded,
+  input_features: unknown,
+  ids: bigint[],
+  language: SpeechLang,
+) {
+  const n = ids.length;
+  if (n < 2) return { confidence: null, words: [], logSum: 0, count: 0 };
+  const dec = new w.Tensor("int64", BigInt64Array.from(ids.slice(0, n - 1)), [
+    1,
+    n - 1,
+  ]);
+  const out = (await w.model({ input_features, decoder_input_ids: dec })) as {
+    logits: { data: Float32Array; dims: number[] };
+  };
+  const { data, dims } = out.logits;
+  const V = dims[2];
+  const piece = (id: number) =>
+    w.tokenizer.decode([id], { skip_special_tokens: true });
+
+  const tokens: { id: number; p: number }[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const next = Number(ids[i + 1]);
+    if (piece(next) === "") continue; // prompt / end / timestamp tokens
+    const off = i * V;
+    let max = -Infinity;
+    for (let k = 0; k < V; k++) if (data[off + k] > max) max = data[off + k];
+    let sum = 0;
+    for (let k = 0; k < V; k++) sum += Math.exp(data[off + k] - max);
+    tokens.push({ id: next, p: Math.exp(data[off + next] - max) / sum });
+  }
+  if (!tokens.length)
+    return { confidence: null, words: [], logSum: 0, count: 0 };
+
+  const logSum = tokens.reduce((a, t) => a + Math.log(Math.max(t.p, 1e-9)), 0);
+  const meanLog = logSum / tokens.length;
+
+  // Group tokens into words (a leading space starts a new word; Chinese has
+  // no spaces, so each complete character group becomes its own "word").
+  const words: { w: string; p: number }[] = [];
+  let group: { id: number; p: number }[] = [];
+  const flush = () => {
+    if (!group.length) return;
+    const text = w.tokenizer.decode(
+      group.map((g) => g.id),
+      { skip_special_tokens: true },
+    );
+    words.push({ w: text, p: Math.min(...group.map((g) => g.p)) });
+    group = [];
+  };
+  for (const t of tokens) {
+    if (piece(t.id).startsWith(" ") && group.length) flush();
+    group.push(t);
+    if (language === "zh") {
+      const text = w.tokenizer.decode(
+        group.map((g) => g.id),
+        { skip_special_tokens: true },
+      );
+      if (!text.includes("\uFFFD")) flush();
+    }
+  }
+  flush();
+
+  return {
+    confidence: Math.exp(meanLog),
+    logSum,
+    count: tokens.length,
+    words: words.map((x) => ({ w: x.w, p: Math.round(x.p * 1000) / 1000 })),
+  };
 }

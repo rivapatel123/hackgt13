@@ -6,6 +6,11 @@ import {
   DEMO_NOW,
   INCIDENT_STATS,
   LANGS,
+  HAZARDS,
+  fmtClock,
+  fmtDate,
+  fmtDuration,
+  responseTime,
   RESPONDER_UNITS,
   timeAgo,
   type CategoryKey,
@@ -308,15 +313,36 @@ export default function MapView({
                             )}
                           </span>
                           <span className="mt-0.5 block truncate text-xs text-zinc-500 dark:text-zinc-400">
-                            {r.raw_location_text ?? "Location pending"} ·{" "}
-                            {when(r, now)}
+                            {r.raw_location_text ?? "Location pending"}
+                          </span>
+                          <span className="mt-0.5 block truncate text-xs text-zinc-500 dark:text-zinc-400">
+                            <time dateTime={r.created_at}>
+                              {fmtClock(r.created_at)}
+                            </time>{" "}
+                            · {when(r, now)}
+                            {r.assignedAt ? (
+                              <span className="text-emerald-700 dark:text-emerald-400">
+                                {" "}
+                                · ✓ responded in {fmtDuration(responseTime(r)!)}
+                              </span>
+                            ) : null}
                           </span>
                         </span>
-                        {r.urgency === "high" && (
-                          <span className="mt-0.5 shrink-0 text-[10px] font-bold text-red-600 uppercase dark:text-red-400">
-                            Urgent
-                          </span>
-                        )}
+                        <span className="mt-0.5 flex shrink-0 flex-col items-end gap-1">
+                          {r.urgency === "high" && (
+                            <span className="text-[10px] font-bold text-red-600 uppercase dark:text-red-400">
+                              Urgent
+                            </span>
+                          )}
+                          {lowestConfidence(r) < LOW && (
+                            <span
+                              className="rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+                              title="The AI is unsure about part of this message — check the recording"
+                            >
+                              ⚠ Verify
+                            </span>
+                          )}
+                        </span>
                       </button>
                       {/* Demo cleanup: only appears on hover */}
                       <button
@@ -397,12 +423,56 @@ function Detail({
                 : ""}
             </p>
           )}
-          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-            {when(r, now)}
-            {away != null &&
-              ` · ${away < 1000 ? `${Math.round(away)} m` : `${(away / 1000).toFixed(1)} km`} from you`}
-          </p>
+          {away != null && (
+            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+              {away < 1000
+                ? `${Math.round(away)} m`
+                : `${(away / 1000).toFixed(1)} km`}{" "}
+              from you
+            </p>
+          )}
         </div>
+
+        {/* When the message came in, and when someone answered it */}
+        <ol className="space-y-2 border-l-2 border-zinc-200 pl-3 text-sm dark:border-zinc-700">
+          <li>
+            <p className="text-xs font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              Message received
+            </p>
+            <p className="font-medium tabular-nums">
+              <time dateTime={r.created_at}>
+                {fmtClock(r.created_at, true)} · {fmtDate(r.created_at)}
+              </time>{" "}
+              <span className="font-normal text-zinc-500 dark:text-zinc-400">
+                ({when(r, now)})
+              </span>
+            </p>
+          </li>
+          <li>
+            <p className="text-xs font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              Responder assigned
+            </p>
+            {r.assignedAt ? (
+              <p className="font-medium tabular-nums">
+                <time dateTime={r.assignedAt}>
+                  {fmtClock(r.assignedAt, true)}
+                </time>{" "}
+                <span className="font-normal text-emerald-700 dark:text-emerald-400">
+                  · {r.assignedTo} · {fmtDuration(responseTime(r)!)} after the
+                  message
+                </span>
+              </p>
+            ) : (
+              <p className="font-medium text-amber-700 dark:text-amber-400">
+                Not yet ·{" "}
+                {fmtDuration(
+                  (r.live ? now : DEMO_NOW) - Date.parse(r.created_at),
+                )}{" "}
+                waiting
+              </p>
+            )}
+          </li>
+        </ol>
 
         <div className="rounded-xl bg-zinc-50 p-3 dark:bg-zinc-800/60">
           <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -414,7 +484,17 @@ function Detail({
               </span>
             )}
           </p>
-          <p className="mt-1 text-sm leading-relaxed">“{r.transcript}”</p>
+          <p className="mt-1 text-sm leading-relaxed">
+            “<TranscriptWords report={r} />”
+          </p>
+          {r.words?.some((w) => w.p < LOW) && (
+            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+              <span className="underline decoration-amber-500 decoration-dotted decoration-2 underline-offset-2">
+                Dotted words
+              </span>{" "}
+              = the AI wasn&apos;t sure it heard them right. Hover for %.
+            </p>
+          )}
           {r.transcriptEn && (
             <div className="mt-3 border-t border-zinc-200 pt-2 dark:border-zinc-700">
               <p className="text-xs font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
@@ -431,12 +511,9 @@ function Detail({
               {r.durationSec ? ` · ${r.durationSec}s` : ""}
             </p>
           ) : null}
-          {r.classifiedOnDevice && (
-            <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
-              Sorted by keyword triage (Grok unavailable for this message).
-            </p>
-          )}
         </div>
+
+        <ConfidencePanel report={r} />
 
         <dl className="grid grid-cols-2 gap-3 text-sm">
           <div>
@@ -488,5 +565,226 @@ function Detail({
         </div>
       </div>
     </div>
+  );
+}
+
+// ---- AI confidence (responders only) ----
+
+const LOW = 0.5; // below this we ask the dispatcher to verify
+const HIGH = 0.8;
+
+/** The weakest measured confidence on a report (1 if nothing was measured). */
+function lowestConfidence(r: Report) {
+  const vals = [
+    r.transcriptionConfidence,
+    r.languageConfidence,
+    r.urgencyConfidence,
+    r.hazardSource === "caller" ? null : r.hazardConfidence,
+  ].filter((v): v is number => typeof v === "number");
+  return vals.length ? Math.min(...vals) : 1;
+}
+
+function level(p: number) {
+  return p >= HIGH
+    ? {
+        label: "High",
+        bar: "bg-emerald-500",
+        text: "text-emerald-700 dark:text-emerald-400",
+      }
+    : p >= LOW
+      ? {
+          label: "Medium",
+          bar: "bg-amber-500",
+          text: "text-amber-700 dark:text-amber-400",
+        }
+      : {
+          label: "Low",
+          bar: "bg-red-500",
+          text: "text-red-700 dark:text-red-400",
+        };
+}
+
+function ConfidenceRow({
+  name,
+  value,
+  answer,
+  note,
+}: {
+  name: string;
+  value: number | null | undefined;
+  answer: string;
+  note: string;
+}) {
+  const has = typeof value === "number";
+  const lv = has ? level(value) : null;
+  return (
+    <li>
+      <div className="flex items-baseline justify-between gap-2 text-sm">
+        <span>
+          <span className="font-medium">{name}:</span> {answer}
+        </span>
+        <span
+          className={`shrink-0 font-semibold tabular-nums ${lv?.text ?? "text-zinc-500 dark:text-zinc-400"}`}
+        >
+          {has ? `${Math.round(value * 100)}% · ${lv!.label}` : "—"}
+        </span>
+      </div>
+      <div
+        className="mt-1 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700"
+        role="meter"
+        aria-label={`${name} confidence`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={has ? Math.round(value * 100) : undefined}
+      >
+        {has && (
+          <div
+            className={`h-1.5 rounded-full ${lv!.bar}`}
+            style={{ width: `${Math.max(3, value * 100)}%` }}
+          />
+        )}
+      </div>
+      <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+        {note}
+      </p>
+    </li>
+  );
+}
+
+function ConfidencePanel({ report: r }: { report: Report }) {
+  const hazardLabel = r.hazard
+    ? (HAZARDS.find((h) => h.key === r.hazard)?.label ?? r.hazard)
+    : "None detected";
+  const lowest = lowestConfidence(r);
+  const whisper = !!r.words?.length;
+  return (
+    <section
+      aria-label="AI confidence"
+      className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-700"
+    >
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+          AI confidence
+        </p>
+        {lowest < LOW && (
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            ⚠ Listen to the recording to verify
+          </span>
+        )}
+      </div>
+      <ul className="mt-2 space-y-3">
+        <ConfidenceRow
+          name="Transcription"
+          value={r.transcriptionConfidence}
+          answer={
+            r.language && r.language !== "en"
+              ? `${LANGS[r.language].english} speech`
+              : "speech to text"
+          }
+          note={
+            whisper
+              ? "Whisper's average probability for each word it wrote"
+              : r.live
+                ? r.transcriptionConfidence != null
+                  ? "Phone speech recognizer's own confidence"
+                  : "Not measured (no audio model available)"
+                : "Speech model's average word probability"
+          }
+        />
+        {typeof r.languageConfidence === "number" && (
+          <ConfidenceRow
+            name="Language"
+            value={r.languageConfidence}
+            answer={r.language ? LANGS[r.language].english : "—"}
+            note="Whisper's probability for this language vs. English, French, Mandarin and Spanish"
+          />
+        )}
+        <ConfidenceRow
+          name="Urgency"
+          value={r.urgencyConfidence}
+          answer={
+            r.urgency === "high"
+              ? "Urgent"
+              : r.urgency === "medium"
+                ? "Medium"
+                : "Low"
+          }
+          note={
+            r.urgencyConfidence === 1 && r.category === "safe"
+              ? "The person tapped “I'm safe” themselves"
+              : r.classifiedOnDevice === false
+                ? "Grok's own estimate"
+                : "Share of the evidence (urgent words + request type) pointing to this level"
+          }
+        />
+        <ConfidenceRow
+          name="Disaster"
+          value={r.hazardSource === "alert" ? null : r.hazardConfidence}
+          answer={hazardLabel}
+          note={
+            r.hazardSource === "caller"
+              ? "Chosen by the caller (tapped it themselves)"
+              : r.hazardSource === "alert"
+                ? "Not mentioned in the message — taken from the area's active alert"
+                : r.hazardSource === "voice"
+                  ? "Picked from the phone's live captions"
+                  : "Share of disaster keywords that point to this type"
+          }
+        />
+      </ul>
+      <details className="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+        <summary className="cursor-pointer font-medium">
+          How is this calculated?
+        </summary>
+        <ul className="mt-1 list-disc space-y-1 pl-4">
+          <li>
+            <strong>Transcription:</strong> we replay the speech model over its
+            own transcript and read the probability it gave each word. The score
+            is the geometric mean (exp of the average log-probability). Words
+            under 50% are dotted.
+          </li>
+          <li>
+            <strong>Language:</strong> Whisper scores all four supported
+            languages from the audio; this is the winner&apos;s share.
+          </li>
+          <li>
+            <strong>Urgency:</strong> urgent / medium / calm cue words in all
+            four languages plus the request type are weighted, then converted to
+            probabilities (softmax). 33% means no evidence either way.
+          </li>
+          <li>
+            <strong>Disaster:</strong> the winning disaster&apos;s keyword
+            weight ÷ (all disaster keyword weight + a reserve for “something
+            else”), so a single weak word can&apos;t look certain.
+          </li>
+          <li>
+            Green ≥ 80% · amber 50–79% · red &lt; 50% (please verify). These are
+            estimates from the model, not guarantees.
+          </li>
+        </ul>
+      </details>
+    </section>
+  );
+}
+
+/** Transcript with low-confidence words dotted (hover shows the %). */
+function TranscriptWords({ report: r }: { report: Report }) {
+  if (!r.words?.length) return <>{r.transcript}</>;
+  return (
+    <>
+      {r.words.map((w, i) =>
+        w.p < LOW ? (
+          <span
+            key={i}
+            title={`${Math.round(w.p * 100)}% sure`}
+            className={`underline decoration-dotted decoration-2 underline-offset-2 ${w.p < 0.3 ? "decoration-red-500" : "decoration-amber-500"}`}
+          >
+            {w.w}
+          </span>
+        ) : (
+          <span key={i}>{w.w}</span>
+        ),
+      )}
+    </>
   );
 }

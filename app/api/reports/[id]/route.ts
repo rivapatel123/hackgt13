@@ -26,8 +26,15 @@ export async function PATCH(
       ? body.assigned_to
       : null;
   const result = db
-    .prepare("UPDATE reports SET assigned_to = ? WHERE id = ?")
-    .run(assignedTo, id);
+    .prepare(
+      // Record when a responder first answered (cleared if unassigned).
+      `UPDATE reports SET assigned_to = ?,
+         assigned_at = CASE WHEN ? IS NULL THEN NULL
+                            WHEN assigned_at IS NULL THEN datetime('now')
+                            ELSE assigned_at END
+       WHERE id = ?`,
+    )
+    .run(assignedTo, assignedTo, id);
   if (result.changes === 0)
     return NextResponse.json({ error: "not found" }, { status: 404 });
   return NextResponse.json(

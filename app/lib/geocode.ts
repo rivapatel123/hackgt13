@@ -20,7 +20,7 @@ export async function reverseGeocode(
       `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&lat=${lat}&lon=${lng}`,
       {
         headers: {
-          "User-Agent": "CallForHelp/0.1 (hackathon demo)",
+          "User-Agent": "ResQ/0.1 (hackathon demo)",
           "Accept-Language": "en",
         },
         signal: AbortSignal.timeout(3500),

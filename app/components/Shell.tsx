@@ -78,7 +78,7 @@ export default function Shell<T extends string>({
           </span>
           <div>
             <p className="leading-tight font-semibold tracking-tight">
-              CallForHelp
+              ResQ
             </p>
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
               {product}
@@ -179,7 +179,7 @@ export default function Shell<T extends string>({
               <span className="grid size-7 place-items-center rounded-lg bg-red-600 text-white">
                 <SirenIcon width={16} height={16} />
               </span>
-              <span className="font-semibold">CallForHelp</span>
+              <span className="font-semibold">ResQ</span>
               <Link
                 href={switchTo.href}
                 className="ml-1 text-xs text-zinc-500 underline dark:text-zinc-400"

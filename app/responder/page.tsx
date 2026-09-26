@@ -28,7 +28,7 @@ import {
   SettingsIcon,
   UserIcon,
 } from "@/app/components/icons";
-import { SEED_REPORTS, type Report } from "@/app/lib/data";
+import { DEMO_NOW, SEED_REPORTS, type Report } from "@/app/lib/data";
 import { assignReport, deleteReport, fetchReports } from "@/app/lib/api";
 import { setTheme, useTheme } from "@/app/lib/theme";
 import { useNow } from "@/app/lib/useNow";
@@ -82,9 +82,9 @@ export default function ResponderDashboard() {
   const [tab, setTab] = useState<Tab>("map");
   const [live, setLive] = useState<Report[]>([]);
   const [hiddenSeeds, setHiddenSeeds] = useState<Set<string>>(new Set());
-  const [seedAssign, setSeedAssign] = useState<Record<string, string | null>>(
-    {},
-  );
+  const [seedAssign, setSeedAssign] = useState<
+    Record<string, { unit: string | null; at: string | null }>
+  >({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [prefs, setPrefs] = useState<DispatchPrefs>({
@@ -161,19 +161,47 @@ export default function ResponderDashboard() {
     () => [
       ...live,
       ...SEED_REPORTS.filter((r) => !hiddenSeeds.has(r.id)).map((r) =>
-        r.id in seedAssign ? { ...r, assignedTo: seedAssign[r.id] } : r,
+        r.id in seedAssign
+          ? {
+              ...r,
+              assignedTo: seedAssign[r.id].unit,
+              assignedAt: seedAssign[r.id].at,
+            }
+          : r,
       ),
     ],
     [live, seedAssign, hiddenSeeds],
   );
 
   const assign = useCallback(async (id: string, unit: string | null) => {
+    // First assignment stamps the response time; changing unit keeps it.
+    const stamp = (prev: string | null | undefined, now: string) =>
+      unit ? (prev ?? now) : null;
     if (id.startsWith("seed-")) {
-      setSeedAssign((s) => ({ ...s, [id]: unit }));
+      // Demo reports live on the scenario clock.
+      const seed = SEED_REPORTS.find((r) => r.id === id);
+      setSeedAssign((s) => ({
+        ...s,
+        [id]: {
+          unit,
+          at: stamp(
+            id in s ? s[id].at : seed?.assignedAt,
+            new Date(DEMO_NOW).toISOString(),
+          ),
+        },
+      }));
       return;
     }
     setLive((ls) =>
-      ls.map((r) => (r.id === id ? { ...r, assignedTo: unit } : r)),
+      ls.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              assignedTo: unit,
+              assignedAt: stamp(r.assignedAt, new Date().toISOString()),
+            }
+          : r,
+      ),
     );
     await assignReport(id, unit);
   }, []);

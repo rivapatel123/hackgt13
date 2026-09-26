@@ -47,7 +47,8 @@ export async function parseReport(transcript: string) {
             "category (one of: medical, food_water, missing_person, shelter, safe, fire, flood, other), " +
             "urgency (low, medium, high), description (short summary under 90 characters), " +
             "location_text (string or null), " +
-            "hazard (one of: hurricane, flood, tornado, earthquake, wildfire, tsunami, volcano, or null). No other text.",
+            "hazard (one of: hurricane, flood, tornado, earthquake, wildfire, tsunami, volcano, or null), " +
+            "urgency_confidence and hazard_confidence (your probability from 0 to 1 that urgency and hazard are correct). No other text.",
         },
         { role: "user", content: transcript },
       ],
@@ -63,5 +64,7 @@ export async function parseReport(transcript: string) {
     description?: string;
     location_text?: string | null;
     hazard?: string | null;
+    urgency_confidence?: number;
+    hazard_confidence?: number;
   };
 }

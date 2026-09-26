@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // Minimal typing for the Web Speech API (not in lib.dom for all TS versions).
 type SpeechResultList = ArrayLike<{
   isFinal: boolean;
-  0: { transcript: string };
+  0: { transcript: string; confidence?: number };
 }>;
 type SpeechRecognitionLike = {
   continuous: boolean;
@@ -36,6 +36,7 @@ export type Recording = {
   durationSec: number;
   sizeKb: number;
   transcript: string;
+  captionConfidence: number | null; // browser recognizer's average confidence
   coords: { lat: number; lng: number; accuracy: number } | null;
 };
 
@@ -91,6 +92,7 @@ export function useRecorder(opts: {
   const lastVoiceRef = useRef(0);
   const heardVoiceRef = useRef(false);
   const finalTextRef = useRef("");
+  const confRef = useRef<number[]>([]);
   const interimRef = useRef("");
   const coordsRef = useRef<Recording["coords"]>(null);
   const coordsPromiseRef = useRef<Promise<void>>(Promise.resolve());
@@ -127,7 +129,11 @@ export function useRecorder(opts: {
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) finalTextRef.current += ` ${r[0].transcript}`;
+        if (r.isFinal) {
+          finalTextRef.current += ` ${r[0].transcript}`;
+          const c = r[0].confidence;
+          if (typeof c === "number" && c > 0) confRef.current.push(c);
+        }
         else interim += r[0].transcript;
       }
       interimRef.current = interim;
@@ -157,6 +163,7 @@ export function useRecorder(opts: {
       if (!activeRef.current) return;
       // Words so far were decoded in the wrong language — start clean.
       finalTextRef.current = "";
+      confRef.current = [];
       interimRef.current = "";
       setTranscript("");
       beginCaptions(lang);
@@ -187,6 +194,7 @@ export function useRecorder(opts: {
       setGeoError(null);
       coordsPromiseRef.current = Promise.resolve();
       finalTextRef.current = "";
+      confRef.current = [];
       interimRef.current = "";
       coordsRef.current = null;
       heardVoiceRef.current = false;
@@ -289,6 +297,9 @@ export function useRecorder(opts: {
           durationSec,
           sizeKb: blob.size / 1024,
           transcript: text,
+          captionConfidence: confRef.current.length
+            ? confRef.current.reduce((a, b) => a + b, 0) / confRef.current.length
+            : null,
           coords: coordsRef.current,
         });
       };

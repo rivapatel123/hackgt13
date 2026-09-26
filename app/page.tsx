@@ -124,7 +124,13 @@ export default function CivilianDashboard() {
         if (!fresh || fresh.assignedTo === r.assignedTo) continue;
         setMyReports((prev) =>
           prev.map((p) =>
-            p.id === r.id ? { ...p, assignedTo: fresh.assignedTo } : p,
+            p.id === r.id
+              ? {
+                  ...p,
+                  assignedTo: fresh.assignedTo,
+                  assignedAt: fresh.assignedAt,
+                }
+              : p,
           ),
         );
         if (fresh.assignedTo) {
