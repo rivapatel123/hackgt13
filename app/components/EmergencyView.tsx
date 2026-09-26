@@ -8,7 +8,6 @@ import {
   CATEGORIES,
   DEMO_HOME,
   HAZARDS,
-  INCIDENT_STATS,
   LANGS,
   classifyLocally,
   detectHazard,
@@ -30,8 +29,6 @@ import type { AppSettings } from "@/app/components/SettingsView";
 import {
   AlertIcon,
   CheckIcon,
-  ClockIcon,
-  HeartPulseIcon,
   MicIcon,
   PinIcon,
   RefreshIcon,
@@ -39,7 +36,6 @@ import {
   ShieldIcon,
   StopIcon,
   UsersIcon,
-  WaveIcon,
 } from "@/app/components/icons";
 import { CategoryBadge, UrgencyBadge } from "@/app/components/Badges";
 import LeafletMap, { type MapPin } from "@/app/components/LeafletMap";
@@ -706,8 +702,6 @@ export default function EmergencyView({
         </div>
       </div>
 
-      <StatsGrid />
-
       {myReports.length > 0 && (
         <section
           aria-labelledby="mine-title"
@@ -970,91 +964,6 @@ function DeliveryCard({
           )}
         </div>
       )}
-    </section>
-  );
-}
-
-function StatsGrid() {
-  const s = INCIDENT_STATS;
-  const cards = [
-    {
-      label: "Voice messages received",
-      value: s.messagesReceived.toLocaleString(),
-      note: "+312 in the last hour",
-      icon: MicIcon,
-      tone: "text-red-600 bg-red-50 dark:bg-red-950/50 dark:text-red-400",
-    },
-    {
-      label: "Pinned on the map",
-      value: s.pinned.toLocaleString(),
-      note: `${Math.round((s.pinned / s.messagesReceived) * 100)}% auto-located`,
-      icon: PinIcon,
-      tone: "text-blue-600 bg-blue-50 dark:bg-blue-950/50 dark:text-blue-400",
-    },
-    {
-      label: "Average message size",
-      value: `${s.avgSizeKb} KB`,
-      note: "vs ~480 KB for a 1-min call",
-      icon: WaveIcon,
-      tone: "text-violet-600 bg-violet-50 dark:bg-violet-950/50 dark:text-violet-400",
-    },
-    {
-      label: "Median time to dispatch",
-      value: "6m 42s",
-      note: "↓ 58% vs phone hotline",
-      icon: ClockIcon,
-      tone: "text-amber-600 bg-amber-50 dark:bg-amber-950/50 dark:text-amber-400",
-    },
-    {
-      label: "People marked safe",
-      value: s.markedSafe.toLocaleString(),
-      note: `${s.rescuesCompleted} rescues completed`,
-      icon: HeartPulseIcon,
-      tone: "text-emerald-600 bg-emerald-50 dark:bg-emerald-950/50 dark:text-emerald-400",
-    },
-    {
-      label: "Responders in the field",
-      value: String(s.respondersActive),
-      note: "38 teams · 6 agencies",
-      icon: UsersIcon,
-      tone: "text-sky-600 bg-sky-50 dark:bg-sky-950/50 dark:text-sky-400",
-    },
-  ];
-  return (
-    <section aria-labelledby="stats-title">
-      <div className="mb-3 flex items-baseline justify-between">
-        <h2 id="stats-title" className="text-lg font-semibold">
-          Hurricane Delphine response · live
-        </h2>
-        <span className="text-xs text-zinc-500 dark:text-zinc-400">
-          Updated 3:42 PM EDT
-        </span>
-      </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
-        {cards.map((c) => (
-          <div
-            key={c.label}
-            className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className={`grid size-8 place-items-center rounded-lg ${c.tone}`}
-              >
-                <c.icon width={16} height={16} />
-              </span>
-              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-                {c.label}
-              </p>
-            </div>
-            <p className="mt-3 text-3xl font-semibold tabular-nums tracking-tight">
-              {c.value}
-            </p>
-            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              {c.note}
-            </p>
-          </div>
-        ))}
-      </div>
     </section>
   );
 }
