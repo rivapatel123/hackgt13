@@ -51,6 +51,17 @@ type Submission = {
   coords: Coords | null; // location that was sent with the message
 };
 
+// Live language check: switch captions at ≥ CONFIDENT; stop re-checking at ≥ SETTLED.
+const CONFIDENT = 0.75;
+const SETTLED = 0.92;
+const newProbe = () => ({
+  count: 0,
+  busy: false,
+  voiceAt: -1, // recording time (s) when speech was first heard
+  nextAt: 0, // when the next check is due
+  settled: false,
+});
+
 const PROMPTS = [
   {
     key: "who",
@@ -106,7 +117,7 @@ export default function EmergencyView({
   } | null>(null);
   const langRef = useRef<LangKey | null>(null);
   const lastDetected = useRef<LangKey | null>(null);
-  const probe = useRef({ count: 0, busy: false });
+  const probe = useRef(newProbe());
 
   const hazardFor = useCallback(
     (text: string): HazardKey | null => {
@@ -265,33 +276,38 @@ export default function EmergencyView({
         key: first,
         source: settings.language !== "auto" ? "manual" : "device",
       });
-      probe.current = { count: 0, busy: false };
+      probe.current = newProbe();
       recorder.start(LANGS[first].speech);
     }
   };
 
-  // Auto-detect: after ~3 s of speech, send what we have to Whisper to find the
-  // language; if it differs, switch live captions to it. Check once more at
-  // ~8 s if the first answer wasn't confident.
+  // Auto-detect: once the person has been talking ~3 s, send the audio so far
+  // to Whisper. Only switch captions when it's confident; otherwise keep
+  // listening and ask again every ~2.5 s (up to 5 times) until it's sure.
   const { elapsed, heardVoice, snapshot, switchLang } = recorder;
   useEffect(() => {
     if (!recording || settings.language !== "auto" || !heardVoice) return;
     const p = probe.current;
-    const lowConfidence = (lang?.confidence ?? 0) < 0.8;
-    const due =
-      (p.count === 0 && elapsed >= 3.5) ||
-      (p.count === 1 && lowConfidence && elapsed >= 8);
-    if (!due || p.busy) return;
+    if (p.voiceAt < 0) {
+      // Time from the first word, not from the button press (skips silence).
+      p.voiceAt = elapsed;
+      p.nextAt = elapsed + 3;
+    }
+    if (p.settled || p.busy || p.count >= 5 || elapsed < p.nextAt) return;
     const blob = snapshot();
     if (!blob) return;
+    const speechSec = elapsed - p.voiceAt;
     p.busy = true;
     p.count += 1;
+    p.nextAt = elapsed + 2.5;
     const fd = new FormData();
     fd.append("audio", new File([blob], "probe.webm", { type: blob.type }));
     fetch("/api/detect-language", { method: "POST", body: fd })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!d || !isLangKey(d.language)) return;
+        // Not sure yet (e.g. only a name or a few words so far): keep listening.
+        if (d.confidence < CONFIDENT) return;
         if (d.language !== langRef.current)
           switchLang(LANGS[d.language as LangKey].speech);
         langRef.current = d.language;
@@ -301,20 +317,14 @@ export default function EmergencyView({
           source: "detected",
           confidence: d.confidence,
         });
+        // Very sure after enough speech: stop checking.
+        if (d.confidence >= SETTLED && speechSec >= 5) p.settled = true;
       })
       .catch(() => {})
       .finally(() => {
         p.busy = false;
       });
-  }, [
-    recording,
-    elapsed,
-    heardVoice,
-    snapshot,
-    switchLang,
-    settings.language,
-    lang?.confidence,
-  ]);
+  }, [recording, elapsed, heardVoice, snapshot, switchLang, settings.language]);
 
   // The voice guess updates live as the caller talks.
   const detection =
